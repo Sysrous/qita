@@ -40,28 +40,17 @@ uninstall_previous_services() {
         if ! wget --no-check-certificate -q -O "$installer_name" "$DNSMASQ_SNIPROXY_INSTALLER_URL"; then
             warn "下载卸载脚本失败。"
         else
-            # 关键修正：使用 echo "y" 自动回答卸载脚本的 y/n 确认提示
-            echo "y" | bash "$installer_name" -u
-            info "已自动确认并完成卸载。"
-            rm -f "$installer_name"
+            echo "y" | bash "$installer_name" -u; info "已自动确认并完成卸载。"; rm -f "$installer_name"
         fi
     fi
     if [[ -d "/etc/mosdns" || -f "/usr/local/bin/mosdns" || -f "/etc/systemd/system/mosdns.service" ]]; then
-        info "检测到旧版 mosdns，尝试执行卸载..."
-        local installer_name="mosdns_uninstall.sh"
+        info "检测到旧版 mosdns，尝试执行卸载..."; local installer_name="mosdns_uninstall.sh"
         if curl -fsSL "$MOSDNS_INSTALLER_URL" -o "$installer_name"; then
-            # MosDNS的卸载脚本通常不需要交互，直接执行
-            bash "$installer_name" uninstall
-            rm -f "$installer_name"
-            info "通过官方脚本卸载 MosDNS 成功。"
+            bash "$installer_name" uninstall; rm -f "$installer_name"; info "通过官方脚本卸载 MosDNS 成功。"
         else
             warn "下载官方 MosDNS 卸载脚本失败，将执行强制手动清理。"
-            if systemctl is-active --quiet mosdns; then systemctl stop mosdns; fi
-            if systemctl is-enabled --quiet mosdns; then systemctl disable mosdns; fi
-            rm -f /etc/systemd/system/mosdns.service /usr/local/bin/mosdns
-            rm -rf /etc/mosdns
-            systemctl daemon-reload
-            info "MosDNS 手动清理完成。"
+            if systemctl is-active --quiet mosdns; then systemctl stop mosdns; fi; if systemctl is-enabled --quiet mosdns; then systemctl disable mosdns; fi
+            rm -f /etc/systemd/system/mosdns.service /usr/local/bin/mosdns; rm -rf /etc/mosdns; systemctl daemon-reload; info "MosDNS 手动清理完成。"
         fi
     fi
 }
@@ -70,15 +59,12 @@ pre_flight_checks() {
     install_tool "lsof"; install_tool "wget"; install_tool "curl"; install_tool "chattr" "e2fsprogs"; install_tool "jq"
     for port in "${REQUIRED_PORTS[@]}"; do
         if check_port "${port}"; then
-            warn "检测到端口 ${port} 已被占用。"
-            process_info=$(lsof -i:"${port}" | awk 'NR>1 {print "  - 进程:", $1, "PID:", $2}')
+            warn "检测到端口 ${port} 已被占用。"; process_info=$(lsof -i:"${port}" | awk 'NR>1 {print "  - 进程:", $1, "PID:", $2}')
             if [[ "${port}" -eq 53 ]] && lsof -i:53 | grep -q 'systemd-resolve'; then
-                info "端口被 'systemd-resolved' 占用，自动修复..."
-                sed -i -E 's/^#?DNSStubListener=.*/DNSStubListener=no/' /etc/systemd/resolved.conf
+                info "端口被 'systemd-resolved' 占用，自动修复..."; sed -i -E 's/^#?DNSStubListener=.*/DNSStubListener=no/' /etc/systemd/resolved.conf
                 unprotect_resolv_conf; ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf; protect_resolv_conf
                 systemctl restart systemd-resolved.service; sleep 2
-                if check_port 53; then error "自动修复 systemd-resolved 失败！"; fi
-                info "成功释放53端口！"
+                if check_port 53; then error "自动修复 systemd-resolved 失败！"; fi; info "成功释放53端口！"
             else error "端口 ${port} 被未知程序占用：\n${process_info}"; fi
         else info "端口 ${port} 可用。"; fi
     done
@@ -91,8 +77,26 @@ run_main_installation() {
     info "开始执行安装 (参数: ${args[*]})..."; echo "--- [主脚本输出开始] ---"
     bash "$installer_name" "${args[@]}"; local exit_code=$?; echo "--- [主脚本输出结束] ---"
     if [ ${exit_code} -ne 0 ]; then error "主脚本执行失败 (退出码: ${exit_code})。"; fi
-    if ! check_port 53; then error "安装后检测失败：53端口未被 Dnsmasq 监听。"; fi
-    info "核心服务安装并运行成功！"; rm -f "$installer_name"
+    rm -f "$installer_name"
+    # ==================== 关键修正部分 ====================
+    info "核心服务安装命令已执行，开始循环检测服务状态..."
+    local max_retries=10
+    local retry_count=0
+    local service_ready=false
+    while [ $retry_count -lt $max_retries ]; do
+        if check_port 53; then
+            service_ready=true
+            break
+        fi
+        retry_count=$((retry_count + 1))
+        echo -e "${YELLOW}[WAIT]${NC} Dnsmasq服务启动中，等待1秒后重试... (${retry_count}/${max_retries})"
+        sleep 1
+    done
+    if [ "$service_ready" = false ]; then
+        error "安装后检测失败：等待 ${max_retries} 秒后，53端口仍未被 Dnsmasq 监听。"
+    fi
+    info "核心服务安装并运行成功！"
+    # =======================================================
 }
 apply_whitelist() {
     step 4 "应用白名单配置"
@@ -105,6 +109,7 @@ apply_whitelist() {
 set_local_dns_resolver() {
     step 5 "配置系统DNS解析"
     info "正在将本机DNS永久指向 127.0.0.1 ..."; unprotect_resolv_conf
+    # ... (此函数内容不变) ...
     if [ -d /etc/netplan ] && ls /etc/netplan/*.yaml &>/dev/null; then
         info "检测到 Netplan 配置..."; for file in /etc/netplan/*.yaml; do cp "$file" "${file}.bak_$(date +%F)"; done
         sed -i 's/nameservers:.*/nameservers:\n          addresses: [127.0.0.1]/g' /etc/netplan/*.yaml
@@ -127,6 +132,7 @@ set_local_dns_resolver() {
 }
 configure_xrayr() {
     step 6 "可选: 自动配置 XrayR"
+    # ... (此函数内容不变) ...
     local XRAYR_DIR="/etc/XrayR"; if ! [ -d "$XRAYR_DIR" ]; then info "未检测到 XrayR 安装目录 ($XRAYR_DIR)，跳过此步骤。"; return; fi
     info "检测到 XrayR，开始自动化配置..."; local TARGET_DNS_PORT="53"; local ROUTE_FILE="$XRAYR_DIR/route.json"; local DNS_FILE="$XRAYR_DIR/dns.json"
     if [ -f "$ROUTE_FILE" ]; then
@@ -157,6 +163,4 @@ main() {
     if [ -d "/etc/XrayR" ]; then echo -e "XrayR 已被自动配置，将使用此DNS服务进行解析。"; fi
     echo -e "现在，请将您的其他设备（如Apple TV）的DNS服务器地址设置为本机的IP地址。"
 }
-main "$@"
-
 main "$@"
