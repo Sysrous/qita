@@ -27,10 +27,22 @@ GREEN="\033[32m"; YELLOW="\033[33m"; RED="\033[31m"; BLUE="\033[34m"; NC="\033[0
 info() { echo -e "${GREEN}[INFO]${NC} $1"; }; warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }; error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }; step() { echo -e "\n${BLUE}>>> 步骤 ${1}: ${2}${NC}"; }
 RESOLV_CONF_WAS_LOCKED=false
 check_root() { if [ "$(id -u)" -ne 0 ]; then error "此脚本必须以 root 用户权限运行。"; fi; }
-install_tool() { local tool=$1; local pkg_name=$2; [[ -z "$pkg_name" ]] && pkg_name=$tool; if ! command -v "$tool" &> /dev/null; then return 0; fi; warn "命令 '$tool' 未找到，正在尝试安装软件包 '$pkg_name'..."; if command -v apt-get &> /dev/null; then apt-get update -y >/dev/null && apt-get install -y "$pkg_name"; elif command -v yum &> /dev/null; then yum install -y "$pkg_name"; else error "无法自动安装 '$pkg_name'。"; fi; info "'$tool' 安装成功。"; }
+install_tool() { local tool=$1; local pkg_name=$2; [[ -z "$pkg_name" ]] && pkg_name=$tool; if command -v "$tool" &> /dev/null; then return 0; fi; warn "命令 '$tool' 未找到，正在尝试安装软件包 '$pkg_name'..."; if command -v apt-get &> /dev/null; then apt-get update -y >/dev/null && apt-get install -y "$pkg_name"; elif command -v yum &> /dev/null; then yum install -y "$pkg_name"; else error "无法自动安装 '$pkg_name'。"; fi; info "'$tool' 安装成功。"; }
 unprotect_resolv_conf() { if [ -f /etc/resolv.conf ] && lsattr /etc/resolv.conf | grep -q 'i'; then info "检测到 /etc/resolv.conf 被锁定，正在临时解锁..."; chattr -i /etc/resolv.conf; RESOLV_CONF_WAS_LOCKED=true; fi; }
 protect_resolv_conf() { if [[ "$RESOLV_CONF_WAS_LOCKED" = true ]]; then info "操作完成，正在重新锁定 /etc/resolv.conf..."; chattr +i /etc/resolv.conf; RESOLV_CONF_WAS_LOCKED=false; fi; }
-check_port() { local port=$1; if lsof -i:"$port" -sTCP:LISTEN -P -n &>/dev/null || lsof -i:"$port" -sUDP -P -n &>/dev/null; then return 0; else return 1; fi; }
+# ==================== 关键修正部分 (函数重写) ====================
+check_port() {
+    local port=$1
+    # 使用 ss 命令进行检测，它比 lsof 更快、更可靠。
+    # -l: listening, -t: tcp, -u: udp, -n: numeric
+    # grep -q ":${port}\b" 使用单词边界确保精确匹配 (例如 :53 不会匹配 :5353)
+    if ss -tlun | grep -q ":${port}\b"; then
+        return 0 # 成功，端口正在被监听
+    else
+        return 1 # 失败，端口空闲
+    fi
+}
+# ===================================================================
 # --- 核心功能模块 ---
 uninstall_previous_services() {
     step 1 "清理旧版服务 (全程自动)"
@@ -56,10 +68,11 @@ uninstall_previous_services() {
 }
 pre_flight_checks() {
     step 2 "环境预检查"
-    install_tool "lsof"; install_tool "wget"; install_tool "curl"; install_tool "chattr" "e2fsprogs"; install_tool "jq"
+    # 添加 ss (iproute2) 和 lsof (备用) 的检查
+    install_tool "ss" "iproute2"; install_tool "wget"; install_tool "curl"; install_tool "chattr" "e2fsprogs"; install_tool "jq"; install_tool "lsof"
     for port in "${REQUIRED_PORTS[@]}"; do
         if check_port "${port}"; then
-            warn "检测到端口 ${port} 已被占用。"; process_info=$(lsof -i:"${port}" | awk 'NR>1 {print "  - 进程:", $1, "PID:", $2}')
+            warn "检测到端口 ${port} 已被占用。"; local process_info; process_info=$(lsof -i:"${port}" | awk 'NR>1 {print "  - 进程:", $1, "PID:", $2}')
             if [[ "${port}" -eq 53 ]] && lsof -i:53 | grep -q 'systemd-resolve'; then
                 info "端口被 'systemd-resolved' 占用，自动修复..."; sed -i -E 's/^#?DNSStubListener=.*/DNSStubListener=no/' /etc/systemd/resolved.conf
                 unprotect_resolv_conf; ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf; protect_resolv_conf
@@ -78,25 +91,14 @@ run_main_installation() {
     bash "$installer_name" "${args[@]}"; local exit_code=$?; echo "--- [主脚本输出结束] ---"
     if [ ${exit_code} -ne 0 ]; then error "主脚本执行失败 (退出码: ${exit_code})。"; fi
     rm -f "$installer_name"
-    # ==================== 关键修正部分 ====================
     info "核心服务安装命令已执行，开始循环检测服务状态..."
-    local max_retries=10
-    local retry_count=0
-    local service_ready=false
+    local max_retries=10; local retry_count=0; local service_ready=false
     while [ $retry_count -lt $max_retries ]; do
-        if check_port 53; then
-            service_ready=true
-            break
-        fi
-        retry_count=$((retry_count + 1))
-        echo -e "${YELLOW}[WAIT]${NC} Dnsmasq服务启动中，等待1秒后重试... (${retry_count}/${max_retries})"
-        sleep 1
+        if check_port 53; then service_ready=true; break; fi
+        retry_count=$((retry_count + 1)); echo -e "${YELLOW}[WAIT]${NC} Dnsmasq服务启动中，等待1秒后重试... (${retry_count}/${max_retries})"; sleep 1
     done
-    if [ "$service_ready" = false ]; then
-        error "安装后检测失败：等待 ${max_retries} 秒后，53端口仍未被 Dnsmasq 监听。"
-    fi
+    if [ "$service_ready" = false ]; then error "安装后检测失败：等待 ${max_retries} 秒后，53端口仍未被 Dnsmasq 监听。"; fi
     info "核心服务安装并运行成功！"
-    # =======================================================
 }
 apply_whitelist() {
     step 4 "应用白名单配置"
@@ -108,8 +110,8 @@ apply_whitelist() {
 }
 set_local_dns_resolver() {
     step 5 "配置系统DNS解析"
-    info "正在将本机DNS永久指向 127.0.0.1 ..."; unprotect_resolv_conf
     # ... (此函数内容不变) ...
+    info "正在将本机DNS永久指向 127.0.0.1 ..."; unprotect_resolv_conf
     if [ -d /etc/netplan ] && ls /etc/netplan/*.yaml &>/dev/null; then
         info "检测到 Netplan 配置..."; for file in /etc/netplan/*.yaml; do cp "$file" "${file}.bak_$(date +%F)"; done
         sed -i 's/nameservers:.*/nameservers:\n          addresses: [127.0.0.1]/g' /etc/netplan/*.yaml
