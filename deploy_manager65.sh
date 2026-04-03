@@ -18,7 +18,7 @@
 DNSMASQ_SNIPROXY_INSTALLER_URL="https://raw.githubusercontent.com/Sysrous/dnsmasq_sniproxy_install/master/dnsmasq_sniproxy.sh"
 WHITELIST_INSTALLER_URL="https://raw.githubusercontent.com/Sysrous/qita/refs/heads/main/install_whitelist.sh"
 GREEN="\033[32m"; YELLOW="\033[33m"; RED="\033[31m"; BLUE="\033[34m"; NC="\033[0m"
-info() { echo -e "${GREEN}[INFO]${NC} $1"; }; warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }; error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }; step() { echo -e "\n${BLUE}>>> 步骤 ${1}: ${2}${NC}"; }
+info() { echo -e "${GREEN}[INFO]${NC} $1"; }; warn() { echo -e "${YELLOW}[WARN]NC} $1"; }; error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }; step() { echo -e "\n${BLUE}>>> 步骤 ${1}: ${2}${NC}"; }
 # --- 辅助函数 ---
 check_root() { if [ "$(id -u)" -ne 0 ]; then error "此脚本必须以 root 用户权限运行。"; fi; }
 update_package_manager() {
@@ -42,53 +42,48 @@ install_tool() {
     if [ "$install_success" = true ]; then info "软件包 '$pkg_name' 安装成功。"; else error "自动安装 '$pkg_name' 失败。请手动安装后再试。"; fi
 }
 # --- 核心功能模块 ---
-purge_environment() {
-    step 1 "彻底净化环境并恢复网络"
-    info "正在停止、卸载并清理 dnsmasq, sniproxy..."
-    systemctl stop dnsmasq.service sniproxy.service >/dev/null 2>&1
-    systemctl disable dnsmasq.service sniproxy.service >/dev/null 2>&1
-    if command -v apt-get &> /dev/null; then apt-get purge -y dnsmasq sniproxy dnsmasq-base >/dev/null 2>&1; fi
-    rm -rf /etc/dnsmasq.conf /etc/dnsmasq.d /etc/sniproxy.conf
+# ==================== 全新重构的终极净化模块 ====================
+ultimate_purge() {
+    step 1 "执行终极环境净化"
+    info "本步骤将停止并彻底移除 dnsmasq, sniproxy, mosdns 及 systemd-resolved..."
+    # 1. 停止并禁用所有潜在的冲突服务
+    info "正在停止服务: dnsmasq, sniproxy, mosdns, systemd-resolved..."
+    systemctl stop dnsmasq.service sniproxy.service mosdns.service systemd-resolved.service >/dev/null 2>&1
+    systemctl disable dnsmasq.service sniproxy.service mosdns.service systemd-resolved.service >/dev/null 2>&1
+    
+    # 2. 彻底卸载软件包
+    info "正在卸载软件包: dnsmasq, sniproxy..."
+    if command -v apt-get &> /dev/null; then
+        apt-get purge -y dnsmasq sniproxy dnsmasq-base >/dev/null 2>&1
+    elif command -v yum &> /dev/null; then
+        yum remove -y dnsmasq sniproxy >/dev/null 2>&1
+    fi
+    # 3. 删除残留的配置文件和二进制文件 (特别是针对手动安装的 mosdns)
+    info "正在删除残留文件和目录..."
+    rm -rf /etc/dnsmasq.conf /etc/dnsmasq.d /etc/sniproxy.conf /etc/mosdns /usr/local/bin/mosdns /etc/systemd/system/mosdns.service /etc/systemd/system/sniproxy.service
+    # 4. 重新加载 systemd 并恢复网络
+    info "正在重载 systemd 并恢复系统 DNS..."
+    systemctl daemon-reload
     if [ -f /etc/resolv.conf ]; then chattr -i /etc/resolv.conf >/dev/null 2>&1; fi
     echo -e "nameserver 8.8.8.8\nnameserver 1.1.1.1" > /etc/resolv.conf
-    systemctl daemon-reload
-    info "环境净化完成，系统DNS已安全恢复为公共DNS。"
+    info "终极净化完成。环境已清理至最干净状态。"
 }
-# ==================== 全新重写的预检查与冲突处理逻辑 ====================
 pre_flight_checks() {
-    step 2 "环境预检查与强力冲突处理"
+    step 2 "环境预检查与依赖安装"
     update_package_manager
-    install_tool "lsof" "lsof" # lsof 是新的核心依赖
+    install_tool "lsof" "lsof"
     install_tool "wget" "wget"
     install_tool "dig" "dnsutils"
     REQUIRED_PORTS=(53 80 443)
-    info "正在检查所需端口 ${REQUIRED_PORTS[*]} 是否被占用..."
+    info "验证端口 ${REQUIRED_PORTS[*]} 在净化后是否可用..."
     for port in "${REQUIRED_PORTS[@]}"; do
-        # 使用 lsof 直接获取占用指定TCP端口的进程PID
-        local pid
-        pid=$(lsof -ti tcp:"${port}" -sTCP:LISTEN)
-        if [[ -n "$pid" ]]; then
-            local process_name
-            process_name=$(ps -p "$pid" -o comm=)
-            # --- 核心策略判断 ---
-            if [[ "$port" -eq 53 ]]; then
-                warn "端口 53 被进程 '${process_name}' (PID: ${pid}) 占用。"
-                info "根据策略，将自动强制终止该进程以继续安装..."
-                kill -9 "${pid}"
-                sleep 1 # 等待进程退出
-                # 二次验证
-                if lsof -ti tcp:"${port}" -sTCP:LISTEN >/dev/null; then
-                    error "尝试终止进程 ${pid} 失败！端口 53 仍然被占用。请手动处理。"
-                else
-                    info "进程 ${process_name} (PID: ${pid}) 已成功终止，端口 53 已释放。"
-                fi
-            else
-                # 对于端口 80 和 443，保持安全原则
-                error "端口 ${port} 已被重要进程 '${process_name}' (PID: ${pid}) 占用。为避免破坏现有服务，脚本已中止。请您手动停止该服务后重试。"
-            fi
+        if lsof -ti tcp:"${port}" -sTCP:LISTEN >/dev/null; then
+            local pid; pid=$(lsof -ti tcp:"${port}" -sTCP:LISTEN)
+            local process_name; process_name=$(ps -p "$pid" -o comm=)
+            error "严重错误：在终极净化后，端口 ${port} 仍然被未知进程 '${process_name}' (PID: ${pid}) 占用。脚本无法继续，请手动排查。"
         fi
     done
-    info "所有必需端口均可用或已自动处理。"
+    info "端口验证通过！所有必需端口均可用。"
 }
 install_core_services() {
     step 3 "安装核心服务 (Dnsmasq + SNI Proxy)"
@@ -132,6 +127,7 @@ final_verification() {
 configure_system_resolver() {
     step 6 "配置系统使用本地DNS服务"
     info "所有检查均已通过。现在，安全地将系统 DNS 指向本地。"
+    if [ -f /etc/resolv.conf ]; then chattr -i /etc/resolv.conf >/dev/null 2>&1; fi
     echo "nameserver 127.0.0.1" > /etc/resolv.conf
     info "系统 DNS 已成功配置为 127.0.0.1。未进行任何文件锁定。"
 }
@@ -147,7 +143,7 @@ configure_xrayr() {
 # --- 主逻辑 ---
 main() {
     check_root
-    purge_environment
+    ultimate_purge
     pre_flight_checks
     install_core_services
     apply_whitelist
