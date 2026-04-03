@@ -21,15 +21,42 @@ GREEN="\033[32m"; YELLOW="\033[33m"; RED="\033[31m"; BLUE="\033[34m"; NC="\033[0
 info() { echo -e "${GREEN}[INFO]${NC} $1"; }; warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }; error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }; step() { echo -e "\n${BLUE}>>> 步骤 ${1}: ${2}${NC}"; }
 # --- 辅助函数 ---
 check_root() { if [ "$(id -u)" -ne 0 ]; then error "此脚本必须以 root 用户权限运行。"; fi; }
+# ==================== 经过彻底修正和优化的函数 ====================
+update_package_manager() {
+    info "正在更新软件包列表，这可能需要一些时间..."
+    if command -v apt-get &> /dev/null; then
+        apt-get update -y >/dev/null 2>&1 || warn "apt-get update 失败，但仍将继续尝试安装依赖。"
+    elif command -v yum &> /dev/null; then
+        yum makecache fast >/dev/null 2>&1 || warn "yum makecache 失败，但仍将继续尝试安装依赖。"
+    fi
+}
 install_tool() {
     local tool_cmd=$1; local pkg_name=$2; [[ -z "$pkg_name" ]] && pkg_name=$tool_cmd
     if command -v "$tool_cmd" &> /dev/null; then return 0; fi
-    warn "命令 '$tool_cmd' 未找到，正在尝试安装软件包 '$pkg_name'..."
+    warn "命令 '$tool_cmd' 未找到，正在尝试自动安装软件包 '$pkg_name'..."
+    local install_success=false
     if command -v apt-get &> /dev/null; then
-        apt-get update -y >/dev/null; apt-get install -y "$pkg_name" >/dev/null
-    elif command -v yum &> /dev/null; then yum install -y "$pkg_name" >/dev/null; fi
-    command -v "$tool_cmd" &> /dev/null || error "安装 '$pkg_name' 失败。"
-    info "'$pkg_name' 安装成功。"
+        # **核心修复点：添加了 -y 参数**
+        apt-get install -y "$pkg_name" >/dev/null 2>&1 && install_success=true
+    elif command -v yum &> /dev/null; then
+        yum install -y "$pkg_name" >/dev/null 2>&1 && install_success=true
+    fi
+    if [ "$install_success" = true ]; then
+        info "软件包 '$pkg_name' 安装成功。"
+    else
+        error "自动安装 '$pkg_name' 失败。请检查您的包管理器配置和网络连接，然后手动安装 (例如: apt install $pkg_name) 后再试。"
+    fi
+}
+handle_systemd_resolved() {
+    warn "检测到系统内置的 'systemd-resolved' 服务占用了端口 53。"
+    info "这是一个预期的冲突，脚本将自动处理以兼容 dnsmasq。"
+    info "正在停止并禁用 systemd-resolved 服务..."
+    systemctl stop systemd-resolved
+    systemctl disable systemd-resolved
+    info "正在修复被 systemd-resolved 控制的 /etc/resolv.conf..."
+    if [ -L /etc/resolv.conf ]; then rm /etc/resolv.conf; fi
+    echo -e "nameserver 8.8.8.8\nnameserver 1.1.1.1" > /etc/resolv.conf
+    info "systemd-resolved 已被成功禁用，网络配置已修正。"
 }
 # --- 核心功能模块 ---
 purge_environment() {
@@ -44,9 +71,9 @@ purge_environment() {
     systemctl daemon-reload
     info "环境净化完成，系统DNS已安全恢复为公共DNS。"
 }
-# ==================== 功能已恢复并强化 ====================
 pre_flight_checks() {
-    step 2 "环境预检查与端口可用性验证"
+    step 2 "环境预检查与依赖安装"
+    update_package_manager # 统一执行一次包管理器更新
     install_tool "ss" "iproute2"
     install_tool "wget" "wget"
     install_tool "dig" "dnsutils"
@@ -54,20 +81,25 @@ pre_flight_checks() {
     info "正在检查所需端口 ${REQUIRED_PORTS[*]} 是否被占用..."
     local port_conflict=false
     for port in "${REQUIRED_PORTS[@]}"; do
-        # 使用 ss -tlpn 而不是 -tlun 来获取TCP监听端口及对应进程
-        local listening_process=$(ss -tlpn "sport = :${port}" | awk 'NR>1 {print $NF}')
-        if [[ -n "$listening_process" ]]; then
-            error "端口 ${port} 已被进程 ${listening_process} 占用。请先停止该服务再运行脚本。"
-            port_conflict=true
+        local listening_info; listening_info=$(ss -tlpn "sport = :${port}")
+        if [[ -n "$listening_info" ]]; then
+            local process_name; process_name=$(echo "$listening_info" | sed -n 's/.*users:(("\([^"]*\)".*/\1/p')
+            if [[ "$port" -eq 53 && "$process_name" == "systemd-resolved" ]]; then
+                handle_systemd_resolved
+                continue
+            else
+                error "端口 ${port} 已被进程 '${process_name}' 占用。请手动停止该服务再运行脚本。"
+                port_conflict=true
+            fi
         fi
     done
     [ "$port_conflict" = true ] && exit 1
-    info "所有必需端口均可用。"
+    info "所有必需端口均可用或已自动处理。"
 }
 install_core_services() {
     step 3 "安装核心服务 (Dnsmasq + SNI Proxy)"
-    info "正在预更新软件包列表并安装 net-tools 以确保兼容性..."
-    if command -v apt-get &> /dev/null; then apt-get update -y || warn "apt-get update 失败，但仍将继续尝试..."; fi
+    # net-tools 是被调用的子脚本需要的，所以在这里安装
+    info "为确保兼容性，正在安装 net-tools..."
     install_tool "ifconfig" "net-tools"
     
     local installer_name="dnsmasq_sniproxy.sh"
@@ -87,13 +119,12 @@ apply_whitelist() {
     rm -f "$whitelist_installer"
     info "白名单配置已应用。正在重启 Dnsmasq 服务以加载新规则..."
     systemctl restart dnsmasq.service
-    sleep 2 # 等待服务重启
+    sleep 2
     info "服务已重启。"
 }
 final_verification() {
     step 5 "最终服务健康检查"
     info "在修改系统DNS前，进行最后的、最严格的验证..."
-    # 1. 验证端口
     local max_retries=10; local retry_count=0
     until ss -tlun | grep -q ":53\b"; do
         retry_count=$((retry_count + 1))
@@ -102,7 +133,6 @@ final_verification() {
         sleep 1
     done
     info "端口验证成功：Dnsmasq 正在监听端口 53。"
-    # 2. 验证DNS解析功能
     info "正在进行本地 DNS 健康检查 (查询 google.com)..."
     if ! dig @127.0.0.1 google.com +short +time=2 | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
         error "本地DNS健康检查失败！Dnsmasq 服务虽在运行，但无法正确解析域名。"
