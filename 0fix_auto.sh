@@ -1,18 +1,10 @@
 #!/bin/bash
-set -e
-
-if [ "$(id -u)" -ne 0 ]; then
-   echo "错误：必须 root 运行" >&2
-   exit 1
-fi
 
 echo "========================================"
 echo " 开始执行：清理环境 + 重装 MosDNS"
 echo "========================================"
 
-# ==============================
 # 1. 停止服务
-# ==============================
 echo "[1/6] 停止相关服务..."
 SERVICES=(
     sysrous.service deploy_manager.service manager.service
@@ -21,83 +13,73 @@ SERVICES=(
 for s in "${SERVICES[@]}"; do
     systemctl stop "$s" 2>/dev/null
     systemctl disable "$s" 2>/dev/null
-    rm -f /etc/systemd/system/$s /lib/systemd/system/$s
+    rm -f /etc/systemd/system/$s /lib/systemd/system/$s 2>/dev/null
 done
-systemctl daemon-reload
+systemctl daemon-reload 2>/dev/null
 
-# ==============================
 # 2. 彻底卸载 ipset
-# ==============================
 echo "[2/6] 清空 ipset 规则并彻底卸载..."
 ipset flush 2>/dev/null
 ipset destroy 2>/dev/null
-apt-get remove --purge ipset -y
-apt-get autoremove --purge -y
-rm -f /usr/sbin/ipset /sbin/ipset /usr/local/sbin/ipset
-hash -r
+apt-get remove --purge ipset -y 2>/dev/null
+apt-get autoremove --purge -y 2>/dev/null
+rm -f /usr/sbin/ipset /sbin/ipset /usr/local/sbin/ipset 2>/dev/null
+hash -r 2>/dev/null
 
-# ==============================
 # 3. 卸载 dnsmasq + sniproxy
-# ==============================
 echo "[3/6] 卸载 dnsmasq + sniproxy（彻底清理）..."
-apt-get purge dnsmasq dnsmasq-base sniproxy -y
+apt-get purge dnsmasq dnsmasq-base sniproxy -y 2>/dev/null
 rm -rf \
     /usr/sbin/dnsmasq /usr/local/sbin/dnsmasq \
     /usr/sbin/sniproxy /usr/local/sbin/sniproxy \
     /etc/dnsmasq* /etc/sniproxy* /var/log/sniproxy \
     /tmp/sniproxy* /tmp/dnsmasq-* \
-    /opt/deploy_manager /etc/sysrous
+    /opt/deploy_manager /etc/sysrous 2>/dev/null
 
-apt-get autoremove -y
-apt clean
+apt-get autoremove -y 2>/dev/null
+apt clean 2>/dev/null
 
-# ==============================
 # 4. 重置 DNS
-# ==============================
 echo "[4/6] 重置系统 DNS..."
-chattr -i /etc/resolv.conf
+chattr -i /etc/resolv.conf 2>/dev/null
 cat > /etc/resolv.conf <<EOF
 nameserver 8.8.8.8
 nameserver 1.1.1.1
 nameserver 2001:4860:4860::8888
 nameserver 2606:4700:4700::1111
 EOF
-chattr +i /etc/resolv.conf
+chattr +i /etc/resolv.conf 2>/dev/null
 
-# ==============================
 # 5. 防火墙
-# ==============================
 echo "[5/6] 配置防火墙..."
-apt update -qq
-apt install ufw -y
-ufw default deny incoming
-ufw default allow outgoing
-ufw allow 22/tcp
-ufw allow 80/tcp
-ufw allow 443/tcp
-ufw allow 2233/tcp
-ufw allow 2096/tcp
-ufw allow 10053/tcp
-ufw allow 10053/udp
-ufw allow 40000:60000/tcp
-ufw --force enable
+apt update -qq 2>/dev/null
+apt install ufw -y 2>/dev/null
+ufw default deny incoming 2>/dev/null
+ufw default allow outgoing 2>/dev/null
+ufw allow 22/tcp 2>/dev/null
+ufw allow 80/tcp 2>/dev/null
+ufw allow 443/tcp 2>/dev/null
+ufw allow 2233/tcp 2>/dev/null
+ufw allow 2096/tcp 2>/dev/null
+ufw allow 10053/tcp 2>/dev/null
+ufw allow 10053/udp 2>/dev/null
+ufw allow 4500:65535/tcp 2>/dev/null
+ufw allow 4500:65535/udp 2>/dev/null
+ufw --force enable 2>/dev/null
 
-# ==============================
 # 6. 安装 MosDNS
-# ==============================
-echo -e "\n[6/6] 覆盖安装 MosDNS + 对接 XrayR..."
+echo "[6/6] 覆盖安装 MosDNS + 对接 XrayR..."
 
 systemctl stop mosdns 2>/dev/null
-rm -rf /etc/mosdns /usr/local/bin/mosdns /etc/systemd/system/mosdns.service
-systemctl daemon-reload
-mkdir -p /etc/mosdns
+rm -rf /etc/mosdns /usr/local/bin/mosdns /etc/systemd/system/mosdns.service 2>/dev/null
+systemctl daemon-reload 2>/dev/null
+mkdir -p /etc/mosdns 2>/dev/null
 
 PORT=15454
 
 if ! command -v jq &>/dev/null; then
-    echo "安装 jq..."
-    apt-get update
-    apt-get install -y jq
+    apt-get update -y 2>/dev/null
+    apt-get install -y jq 2>/dev/null
 fi
 
 ARCH=$(uname -m)
@@ -107,12 +89,11 @@ case $ARCH in
     *) echo "不支持的架构"; exit 1 ;;
 esac
 
-echo "下载 MosDNS..."
-wget -q -O /tmp/mosdns.zip https://github.com/IrineSistiana/mosdns/releases/download/v5.3.1/mosdns-linux-${PLAT}.zip
-unzip -qo /tmp/mosdns.zip -d /usr/local/bin
-chmod +x /usr/local/bin/mosdns
+wget -q -O /tmp/mosdns.zip https://github.com/IrineSistiana/mosdns/releases/download/v5.3.1/mosdns-linux-${PLAT}.zip 2>/dev/null
+unzip -qo /tmp/mosdns.zip -d /usr/local/bin 2>/dev/null
+chmod +x /usr/local/bin/mosdns 2>/dev/null
 
-echo -n -e "\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03\x03\x00\x00\x00\x00\x00\x00\x00\x00\x00" > /etc/mosdns/cache.dump
+echo -n -e "\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03\x03\x00\x00\x00\x00\x00\x00\x00\x00\x00" > /etc/mosdns/cache.dump 2>/dev/null
 
 cat > /etc/mosdns/config.yaml << 'EOF'
 log:
@@ -158,7 +139,7 @@ plugins:
       listen: "127.0.0.1:DNS_PORT"
 EOF
 
-sed -i "s/DNS_PORT/$PORT/g" /etc/mosdns/config.yaml
+sed -i "s/DNS_PORT/$PORT/g" /etc/mosdns/config.yaml 2>/dev/null
 
 cat > /etc/systemd/system/mosdns.service << EOF
 [Unit]
@@ -175,20 +156,20 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload
-systemctl enable mosdns
-systemctl restart mosdns
+systemctl daemon-reload 2>/dev/null
+systemctl enable mosdns 2>/dev/null
+systemctl restart mosdns 2>/dev/null
 
 DNS_FILE="/etc/XrayR/dns.json"
 if [ -f "$DNS_FILE" ]; then
     tmp=$(mktemp)
-    jq --arg port "$PORT" '.servers = [{"address":"127.0.0.1","port":($port|tonumber)}]' "$DNS_FILE" > "$tmp" && mv "$tmp" "$DNS_FILE"
-    echo "✅ XrayR dns.json 已更新"
+    jq --arg port "$PORT" '.servers = [{"address":"127.0.0.1","port":($port|tonumber)}]' "$DNS_FILE" > "$tmp" && mv "$tmp" "$DNS_FILE" 2>/dev/null
 fi
 
 xrayr restart 2>/dev/null || systemctl restart XrayR 2>/dev/null
 
-echo -e "\n========================================"
+echo ""
+echo "========================================"
 echo "🎉 全部执行完成！"
 echo "========================================"
 echo ""
