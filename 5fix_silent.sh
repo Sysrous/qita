@@ -17,13 +17,14 @@ done
 systemctl daemon-reload
 
 # ==============================
-# 清空并卸载 ipset
+# 彻底清空并卸载 ipset
 # ==============================
-ipset flush
-ipset destroy
-apt-get purge ipset -y
-apt-get autoremove -y
-rm -f /sbin/ipset /usr/sbin/ipset /usr/local/sbin/ipset
+ipset flush 2>/dev/null
+ipset destroy 2>/dev/null
+apt-get remove --purge ipset -y
+apt-get autoremove --purge -y
+rm -f /usr/sbin/ipset /sbin/ipset /usr/local/sbin/ipset
+hash -r
 
 # ==============================
 # 卸载 dnsmasq + sniproxy
@@ -94,7 +95,7 @@ wget -q -O /tmp/mosdns.zip https://github.com/IrineSistiana/mosdns/releases/down
 unzip -qo /tmp/mosdns.zip -d /usr/local/bin
 chmod +x /usr/local/bin/mosdns
 
-echo -n -e "\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03\x03\x00\x00\x00\x00\x00\x00\x00\x00\x00" > /etc/mosdns/cache.dump
+echo -n -e "\x1f\x8b\x08\x00\x00000000\x03\x03\x00\x00\x00\x00\x00\x00\x00\x00\x00" > /etc/mosdns/cache.dump
 
 cat > /etc/mosdns/config.yaml << 'EOF'
 log:
@@ -171,3 +172,51 @@ if [ -f "$DNS_FILE" ]; then
 fi
 
 xrayr restart || systemctl restart XrayR
+
+# ==============================
+# 关闭静默，输出最终状态
+# ==============================
+exec 1>/dev/tty
+exec 2>/dev/tty
+
+echo "========================================"
+echo "🎉 全部执行完成！"
+echo "  - ipset 已卸载"
+echo "  - dnsmasq + sniproxy 已彻底卸载"
+echo "  - MosDNS 已覆盖安装 15454 端口"
+echo "  - XrayR dns.json 已自动修改"
+echo "========================================"
+echo ""
+echo "=== 最终状态 ==="
+
+if command -v ipset >/dev/null 2>&1; then
+    echo "ipset: 未卸载（异常）"
+else
+    echo "ipset: 已卸载（正常）"
+fi
+
+if command -v dnsmasq >/dev/null 2>&1; then
+    echo "dnsmasq: 未卸载（异常）"
+else
+    echo "dnsmasq: 已卸载（正常）"
+fi
+
+if command -v sniproxy >/dev/null 2>&1; then
+    echo "sniproxy: 未卸载（异常）"
+else
+    echo "sniproxy: 已卸载（正常）"
+fi
+
+mosdns_status=$(systemctl is-active mosdns 2>/dev/null)
+if [ "$mosdns_status" = "active" ]; then
+    echo "mosdns: active (正常)"
+else
+    echo "mosdns: inactive (异常)"
+fi
+
+xrayr_status=$(systemctl is-active XrayR 2>/dev/null || systemctl is-active xrayr 2>/dev/null)
+if [ "$xrayr_status" = "active" ]; then
+    echo "XrayR: active (正常)"
+else
+    echo "XrayR: inactive (异常)"
+fi
