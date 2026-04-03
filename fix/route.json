@@ -1,0 +1,64 @@
+{
+  "domainStrategy": "IPIfNonMatch",
+  "rules": [
+    {
+      "type": "field",
+      "outboundTag": "block",
+      "ip": [
+        "geoip:private",
+        "geoip:cn"
+      ]
+    },
+    {
+      "type": "field",
+      "outboundTag": "block",
+      "protocol": [
+        "bittorrent"
+      ]
+    },
+    {
+      "type": "field",
+      "outboundTag": "block",
+      "domain": [
+        "regexp:(.*\\.||)(Thunder|xunlei|XLLiveUD|bt_key|ed2k|magnet:|peer_id=|torrent)",
+        "regexp:(\\.torrent|peer_id=|info_hash|get_peers|find_node|BitTorrent|announce_peer|announce\\.php\\?passkey=)",
+        "regexp:(.*\\.||)(aboluowang|amnesty|appledaily|bannedbook|bbc|bitterwinter|bloomberg|boxun|chinadigitaltimes|chinapress|citizenpowerforchina|creaders|dajiyuan|dalailama|dongtaiwang|dw|dwnews|epochtimes|epochweekly|freetibet|freedomhouse|independent|inmediahk|inside|minghui|mingjinglive|mingjingnews|modernchinastudies|nextdigital|ntdtv|nytimes|pincong|rfa|rfi|roc-taiwan|secretchina|soundofhope|theinitium|thenewslens|tibet|tuidang|udn|usembassy-china|voacantonese|voachinese|voanews|wsj|wujieliulan|xizang-zhiye|yibaochina|zhengjian|zhuichaguoji)\\.(com|org|net|info|cc|tv|info|cn|int|mil|gov|us|cloud|fun|xyz|cc|fun|gs|la|me|de|biz)",
+        "regexp:(.*\\.||)(dafahao|falunaz|falundafa|falungong|fawanghuihui|learnfalungong|master-li|ninecommentaries|qi-gong|shenyuncreations|shenyunperformingarts|xinsheng)\\.(com|org|net|info|cc|tv|info|cn|int|mil|gov|us|cloud|fun|xyz|cc|fun|gs|la|me|de|biz)",
+        "regexp:(.*\\.||)(breakgfw|ultrasurf)\\.(com|org|net|info|cc|tv|info|cn|int|mil|gov|us|cloud|fun|xyz|cc|fun|gs|la|me|de|biz)",
+        "regexp:(.*\\.||)(2miners|antpool|btc|ethermine|f2pool|flexpool|hiveon|k1pool|nanopool|nicehash|poolin|slushpool|viabtc|crazypool|emcd|miningpoolhub|woolypooly)\\.(com|org|net|info|cc|tv|info|cn|int|mil|gov|us)",
+        "regexp:(^\\.@)(guerrillamail|guerrillamailblock|sharklasers|grr|pokemail|spam4|bccto|chacuo|027168)\\.(com|org|net|info|cc|tv|info|cn|int|mil|gov|us|cloud|fun|xyz|cc|fun|gs|la|me|de|biz)",
+        "regexp:(.*\\.||)(laomoe|jiyou|ssss|lolicp|vv1234|0z|4321q|868123|ksweb|mm126)\\.(com|org|net|info|cc|tv|info|cn|int|mil|gov|us|cloud|fun|xyz|cc|fun|gs|la|me|de|biz)",
+        "regexp:(.*\\.||)(meituan|dianping|sankuai)\\.(com|cn|net|org|hk|info)",
+        "regexp:(.*\\.||)(amap|map\\.qq|autonavi)\\.(com|cn|net|org|hk|info)",
+        "regexp:(.*\\.||)(ping0|ip-api|ip138|ipinfo|ipip|whoer|ipleak|browserleaks|whatismyip|ifconfig|maxmind|ipstack|ip2location|db-ip|digitalelement|skk)\\.(cc|com|net|org|io|me|co|sb|cn|moe|info|tv|biz|de|uk|us)",
+        "regexp:(api|ps|sv|offnavi|newvector|ulog\\.imap|newloc)(\\.map|)\\.(baidu|n\\.shifen)\\.(com|cn|net|org|hk|info)"
+      ]
+    },
+    {
+      "type": "field",
+      "outboundTag": "IPv6_out",
+      "domain": [
+        "byr.pt"
+      ]
+    },
+    {
+      "type": "field",
+      "outboundTag": "unlock",
+      "domain": [
+        "geosite:netflix",
+        "geosite:disney",
+        "geosite:tiktok",
+        "geosite:hulu",
+        "geosite:bahamut",
+        "geosite:hbo",
+        "geosite:abema",
+        "geosite:dmm"
+      ]
+    },
+    {
+      "type": "field",
+      "outboundTag": "IPv4_out",
+      "network": "tcp,udp"
+    }
+  ]
+}
