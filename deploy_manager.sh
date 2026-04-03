@@ -19,7 +19,7 @@
 # --- 配置 ---
 DNSMASQ_SNIPROXY_INSTALLER_URL="https://raw.githubusercontent.com/Sysrous/dnsmasq_sniproxy_install/master/dnsmasq_sniproxy.sh"
 WHITELIST_INSTALLER_URL="https://dl.xinluc.com/install_whitelist.sh"
-MOSDNS_INSTALLER_URL="https://usgitdmit01.xinluc.com/https://github.com/Sysrous/dnsmasq_sniproxy_install/raw/master/mosdnsall_install.sh"
+MOSDNS_INSTALLER_URL="https://raw.githubusercontent.com/Sysrous/qita/refs/heads/main/mosdnsall_install.sh"
 REQUIRED_PORTS=(53 80 443)
 
 # --- 美化输出及辅助函数 ---
