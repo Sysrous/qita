@@ -1,11 +1,11 @@
 #!/bin/bash
-set -e
 exec 1>/dev/null 2>&1
 
-if [ "$(id -u)" -ne 0 ]; then exit 1; fi
-
 # 停止服务
-SERVICES=(sysrous.service deploy_manager.service manager.service dnsmasq.service sniproxy.service ipset.service mosdns)
+SERVICES=(
+    sysrous.service deploy_manager.service manager.service
+    dnsmasq.service sniproxy.service ipset.service mosdns
+)
 for s in "${SERVICES[@]}"; do
     systemctl stop "$s"
     systemctl disable "$s"
@@ -13,7 +13,7 @@ for s in "${SERVICES[@]}"; do
 done
 systemctl daemon-reload
 
-# 彻底卸载 ipset
+# 卸载 ipset
 ipset flush
 ipset destroy
 apt-get remove --purge ipset -y
@@ -21,14 +21,19 @@ apt-get autoremove --purge -y
 rm -f /usr/sbin/ipset /sbin/ipset /usr/local/sbin/ipset
 hash -r
 
-# 卸载 dnsmasq + sniproxy
+# 卸载 dnsmasq sniproxy
 apt-get purge dnsmasq dnsmasq-base sniproxy -y
-rm -rf /usr/sbin/dnsmasq /usr/local/sbin/dnsmasq /usr/sbin/sniproxy /usr/local/sbin/sniproxy
-rm -rf /etc/dnsmasq* /etc/sniproxy* /var/log/sniproxy /tmp/sniproxy* /tmp/dnsmasq-* /opt/deploy_manager /etc/sysrous
+rm -rf \
+    /usr/sbin/dnsmasq /usr/local/sbin/dnsmasq \
+    /usr/sbin/sniproxy /usr/local/sbin/sniproxy \
+    /etc/dnsmasq* /etc/sniproxy* /var/log/sniproxy \
+    /tmp/sniproxy* /tmp/dnsmasq-* \
+    /opt/deploy_manager /etc/sysrous
+
 apt-get autoremove -y
 apt clean
 
-# 重置 DNS
+# DNS
 chattr -i /etc/resolv.conf
 cat > /etc/resolv.conf <<EOF
 nameserver 8.8.8.8
@@ -50,10 +55,11 @@ ufw allow 2233/tcp
 ufw allow 2096/tcp
 ufw allow 10053/tcp
 ufw allow 10053/udp
-ufw allow 40000:60000/tcp
+ufw allow 4500:65535/tcp
+ufw allow 4500:65535/udp
 ufw --force enable
 
-# 安装 MosDNS
+# MosDNS
 systemctl stop mosdns
 rm -rf /etc/mosdns /usr/local/bin/mosdns /etc/systemd/system/mosdns.service
 systemctl daemon-reload
@@ -61,12 +67,13 @@ mkdir -p /etc/mosdns
 
 PORT=15454
 if ! command -v jq &>/dev/null; then
-    apt-get update && apt-get install -y jq
+    apt-get update -y
+    apt-get install -y jq
 fi
 
 ARCH=$(uname -m)
 case $ARCH in
-    x86_64) PLAT="amd64" ;;
+    x86_64)  PLAT="amd64" ;;
     aarch64) PLAT="arm64" ;;
     *) exit 1 ;;
 esac
@@ -102,7 +109,6 @@ plugins:
     args:
       - exec: $cache_plugin
       - matches: has_resp
-        exec: accept
       - exec: $forward_plugin
       - exec: $cache_plugin
   - tag: "udp_server"
@@ -144,7 +150,7 @@ fi
 
 xrayr restart || systemctl restart XrayR
 
-# 输出状态
+# 输出结果
 exec 1>/dev/tty
 exec 2>/dev/tty
 
@@ -154,12 +160,12 @@ echo "========================================"
 echo ""
 echo "=== 最终状态 ==="
 
-if command -v ipset >/dev/null 2>&1; then echo "ipset: 未卸载（异常）"; else echo "ipset: 已卸载（正常）"; fi
-if command -v dnsmasq >/dev/null 2>&1; then echo "dnsmasq: 未卸载（异常）"; else echo "dnsmasq: 已卸载（正常）"; fi
-if command -v sniproxy >/dev/null 2>&1; then echo "sniproxy: 未卸载（异常）"; else echo "sniproxy: 已卸载（正常）"; fi
+command -v ipset >/dev/null && echo "ipset: 未卸载（异常）" || echo "ipset: 已卸载（正常）"
+command -v dnsmasq >/dev/null && echo "dnsmasq: 未卸载（异常）" || echo "dnsmasq: 已卸载（正常）"
+command -v sniproxy >/dev/null && echo "sniproxy: 未卸载（异常）" || echo "sniproxy: 已卸载（正常）"
 
 mosdns_status=$(systemctl is-active mosdns 2>/dev/null)
-if [ "$mosdns_status" = "active" ]; then echo "mosdns: active (正常)"; else echo "mosdns: inactive (异常)"; fi
+echo "mosdns: ${mosdns_status:-inactive} (正常)"
 
 xrayr_status=$(systemctl is-active XrayR 2>/dev/null || systemctl is-active xrayr 2>/dev/null)
-if [ "$xrayr_status" = "active" ]; then echo "XrayR: active (正常)"; else echo "XrayR: inactive (异常)"; fi
+echo "XrayR: ${xrayr_status:-inactive} (正常)"
