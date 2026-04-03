@@ -13,53 +13,19 @@
 #
 # ========================================================================================
 # --- 配置 ---
-# 代理列表，脚本将按顺序尝试。"" 代表直连。
-PROXY_LIST=(
-    "https://raw.kgithub.com"
-    "https://ghproxy.com/https://raw.githubusercontent.com"
-    "https://mirror.ghproxy.com/https://raw.githubusercontent.com"
-    "https://raw.gitmirror.com"
-    "https://raw.githubusercontent.com" # 直连作为最后尝试
-)
-DNSMASQ_SNIPROXY_REPO_PATH="Sysrous/dnsmasq_sniproxy_install/master/dnsmasq_sniproxy.sh"
-WHITELIST_INSTALLER_URL="Sysrous/qita/refs/heads/main/install_whitelist.sh"
+DNSMASQ_SNIPROXY_INSTALLER_URL="https://raw.githubusercontent.com/Sysrous/dnsmasq_sniproxy_install/master/dnsmasq_sniproxy.sh"
+WHITELIST_INSTALLER_URL="https://raw.githubusercontent.com/Sysrous/qita/refs/heads/main/install_whitelist.sh"
 REQUIRED_PORTS=(53 80 443)
 # --- 美化输出及辅助函数 ---
 GREEN="\033[32m"; YELLOW="\033[33m"; RED="\033[31m"; BLUE="\033[34m"; NC="\033[0m"
 info() { echo -e "${GREEN}[INFO]${NC} $1"; }; warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }; error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }; step() { echo -e "\n${BLUE}>>> 步骤 ${1}: ${2}${NC}"; }
+RESOLV_CONF_WAS_LOCKED=false
 check_root() { if [ "$(id -u)" -ne 0 ]; then error "此脚本必须以 root 用户权限运行。"; fi; }
 install_tool() { local tool=$1; local pkg_name=$2; [[ -z "$pkg_name" ]] && pkg_name=$tool; if ! command -v "$tool" &> /dev/null; then return 0; fi; warn "命令 '$tool' 未找到，正在尝试安装软件包 '$pkg_name'..."; if command -v apt-get &> /dev/null; then apt-get update -y >/dev/null && apt-get install -y "$pkg_name"; elif command -v yum &> /dev/null; then yum install -y "$pkg_name"; else error "无法自动安装 '$pkg_name'。"; fi; info "'$tool' 安装成功。"; }
+unprotect_resolv_conf() { if [ -f /etc/resolv.conf ] && lsattr /etc/resolv.conf | grep -q 'i'; then info "检测到 /etc/resolv.conf 被锁定，正在临时解锁..."; chattr -i /etc/resolv.conf; RESOLV_CONF_WAS_LOCKED=true; fi; }
+protect_resolv_conf() { if [[ "$RESOLV_CONF_WAS_LOCKED" = true ]]; then info "操作完成，正在重新锁定 /etc/resolv.conf..."; chattr +i /etc/resolv.conf; RESOLV_CONF_WAS_LOCKED=false; fi; }
 check_port() { local port=$1; if ss -tlun | grep -q ":${port}\b"; then return 0; else return 1; fi; }
-# ==================== 核心下载容灾函数 ====================
-download_with_failover() {
-    local repo_path="$1"
-    local output_file="$2"
-    
-    for proxy in "${PROXY_LIST[@]}"; do
-        local url="${proxy}/${repo_path}"
-        info "正在尝试下载: ${url}"
-        
-        # 使用 curl 进行下载，设置超时和静默模式
-        if curl -L --connect-timeout 10 --retry 2 -fsS "$url" -o "$output_file"; then
-            # 下载成功后，进行内容校验
-            if [[ -s "$output_file" ]] && ! grep -qiE '<!DOCTYPE html>|<html>|<head>' "$output_file"; then
-                info "✅ 下载成功并校验通过！"
-                return 0
-            else
-                warn "下载内容不正确 (可能是HTML错误页面)，尝试下一个源..."
-                rm -f "$output_file" # 清理错误文件
-            fi
-        else
-            warn "下载失败，尝试下一个源..."
-        fi
-    done
-    
-    error "所有下载源 (包括代理和直连) 均尝试失败。请检查您的服务器网络连接。"
-    return 1
-}
-# =============================================================
 uninstall_mosdns_manually() {
-    # ... 内容不变 ...
     info "开始执行 MosDNS 手动强制卸载..."
     if systemctl is-active --quiet mosdns; then info "正在停止 MosDNS 服务..."; systemctl stop mosdns; fi
     if systemctl is-enabled --quiet mosdns; then info "正在禁用 MosDNS 服务..."; systemctl disable mosdns; fi
@@ -72,13 +38,10 @@ uninstall_previous_services() {
     if [[ -f "/etc/init.d/sniproxy" || -f "/etc/systemd/system/sniproxy.service" ]]; then
         info "检测到旧版 dnsmasq_sniproxy，将自动执行卸载..."
         local installer_name="dnsmasq_sniproxy_uninstall.sh"
-        if ! download_with_failover "$DNSMASQ_SNIPROXY_REPO_PATH" "$installer_name"; then
+        if ! wget --no-check-certificate -q -O "$installer_name" "$DNSMASQ_SNIPROXY_INSTALLER_URL"; then
             warn "下载卸载脚本失败，跳过自动卸载。"
         else
-            # 赋予执行权限
             chmod +x "$installer_name"
-            # 假设卸载脚本也需要修复下载链接
-            sed -i 's#raw.githubusercontent.com#raw.kgithub.com#g' "$installer_name" # 给一个默认的代理
             echo "y" | bash "$installer_name" -u; info "已自动确认并完成卸载。"; rm -f "$installer_name"
         fi
     fi
@@ -87,16 +50,14 @@ uninstall_previous_services() {
     fi
 }
 pre_flight_checks() {
-    # ... 内容不变 ...
     step 2 "环境预检查"
-    install_tool "ss" "iproute2"; install_tool "wget"; install_tool "curl" "curl"; install_tool "chattr" "e2fsprogs"; install_tool "jq"; install_tool "lsof"
+    install_tool "ss" "iproute2"; install_tool "wget"; install_tool "curl"; install_tool "chattr" "e2fsprogs"; install_tool "jq"; install_tool "lsof"
     for port in "${REQUIRED_PORTS[@]}"; do
         if check_port "${port}"; then
             warn "检测到端口 ${port} 已被占用。"; local process_info; process_info=$(lsof -i:"${port}" | awk 'NR>1 {print "  - 进程:", $1, "PID:", $2}')
             if [[ "${port}" -eq 53 ]] && lsof -i:53 | grep -q 'systemd-resolve'; then
                 info "端口被 'systemd-resolved' 占用，自动修复..."; sed -i -E 's/^#?DNSStubListener=.*/DNSStubListener=no/' /etc/systemd/resolved.conf
-                # 解锁/锁定 resolv.conf 的逻辑省略，因为它在 set_local_dns_resolver 中处理
-                ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
+                unprotect_resolv_conf; ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf; protect_resolv_conf
                 systemctl restart systemd-resolved.service; sleep 2
                 if check_port 53; then error "自动修复 systemd-resolved 失败！"; fi; info "成功释放53端口！"
             else error "端口 ${port} 被未知程序占用，请先停止它再运行本脚本：\n${process_info}"; fi
@@ -106,25 +67,17 @@ pre_flight_checks() {
 run_main_installation() {
     step 3 "安装核心服务 (Dnsmasq & SNI Proxy)"
     local args=("$@"); if [ ${#args[@]} -eq 0 ]; then info "未提供安装参数，自动使用快速安装模式 (-f)。"; args=("-f"); fi
-    local installer_name="dnsmasq_sniproxy.sh"; info "正在下载主安装脚本 (具备自动容灾能力)..."
+    local installer_name="dnsmasq_sniproxy.sh"; info "正在直接从 GitHub 下载主安装脚本..."
     
-    if ! download_with_failover "$DNSMASQ_SNIPROXY_REPO_PATH" "$installer_name"; then
-        # 如果下载函数最终失败，它内部已经调用了 error，这里其实不会执行
-        # 但为了逻辑完整性，保留一个错误处理
-        error "主安装脚本下载失败！"
+    if ! wget --no-check-certificate -q -O "$installer_name" "$DNSMASQ_SNIPROXY_INSTALLER_URL"; then
+        error "下载主安装脚本失败！请检查服务器与 GitHub 的网络连接。"
     fi
     
-    info "动态修复子脚本中的下载链接，确保它也使用稳定的代理..."
-    # 我们选择一个已知的好代理（比如列表里的第一个）来替换子脚本里的链接
-    local best_proxy_host=$(echo "${PROXY_LIST[0]}" | awk -F/ '{print $3}')
-    sed -i "s/raw.githubusercontent.com/${best_proxy_host}/g" "$installer_name"
-    info "子脚本修复完成！"
-    info "开始执行安装 (参数: ${args[*]})..."; echo "--- [主脚本输出开始] ---"
+    info "下载成功。开始执行安装 (参数: ${args[*]})..."; echo "--- [主脚本输出开始] ---"
     chmod +x "$installer_name"
     bash "$installer_name" "${args[@]}"; local exit_code=$?; echo "--- [主脚本输出结束] ---"
     if [ ${exit_code} -ne 0 ]; then error "主脚本执行失败 (退出码: ${exit_code})。"; fi
     rm -f "$installer_name"
-    # ... 后续服务检测逻辑不变 ...
     info "核心服务安装命令已执行，开始循环检测服务状态..."
     local max_retries=10; local retry_count=0; local service_ready=false
     while [ $retry_count -lt $max_retries ]; do
@@ -134,11 +87,9 @@ run_main_installation() {
     if [ "$service_ready" = false ]; then error "安装后检测失败：等待 ${max_retries} 秒后，53端口仍未被 Dnsmasq 监听。"; fi
     info "核心服务安装并运行成功！"
 }
-# (apply_whitelist, set_local_dns_resolver, configure_xrayr, main 函数保持不变)
 apply_whitelist() {
     step 4 "应用白名单配置"
     info "正在下载并执行白名单安装脚本..."; local installer_name="install_whitelist.sh"
-    # 注意：白名单脚本不在 GitHub，使用传统 wget
     if ! wget --no-check-certificate -q -O "$installer_name" "$WHITELIST_INSTALLER_URL"; then error "下载白名单脚本失败: $WHITELIST_INSTALLER_URL"; fi
     info "开始执行白名单脚本..."; echo "--- [白名单脚本输出开始] ---"; bash "$installer_name"; local exit_code=$?; echo "--- [白名单脚本输出结束] ---"
     rm -f "$installer_name"; if [ $exit_code -ne 0 ]; then error "白名单脚本执行出错 (退出码: $exit_code)。"; fi
@@ -146,11 +97,17 @@ apply_whitelist() {
 }
 set_local_dns_resolver() {
     step 5 "配置系统DNS解析"
-    # ... 省略代码，与之前版本相同 ...
+    info "正在将本机DNS永久指向 127.0.0.1 ..."; unprotect_resolv_conf
+    if [ -d /etc/netplan ] && ls /etc/netplan/*.yaml &>/dev/null; then info "检测到 Netplan 配置..."; for file in /etc/netplan/*.yaml; do cp "$file" "${file}.bak_$(date +%F)"; done; sed -i 's/nameservers:.*/nameservers:\n          addresses: [127.0.0.1]/g' /etc/netplan/*.yaml; warn "Netplan 配置已修改。请手动运行 'sudo netplan apply'"; elif systemctl is-active --quiet systemd-resolved; then info "检测到 systemd-resolved 服务..."; cp /etc/systemd/resolved.conf /etc/systemd/resolved.conf.bak_$(date +%F); sed -i -E 's/^#?DNS=.*/DNS=127.0.0.1/' /etc/systemd/resolved.conf; sed -i -E 's/^#?FallbackDNS=.*/#FallbackDNS=/' /etc/systemd/resolved.conf; systemctl restart systemd-resolved; info "systemd-resolved 配置完成。"; elif command -v nmcli &> /dev/null && systemctl is-active --quiet NetworkManager; then info "检测到 NetworkManager..."; active_con=$(nmcli -t -f NAME,DEVICE connection show --active | head -n1 | cut -d: -f1); if [ -n "$active_con" ]; then info "正在修改活动连接: '$active_con'"; nmcli con mod "$active_con" ipv4.dns "127.0.0.1"; nmcli con mod "$active_con" ipv4.ignore-auto-dns yes; nmcli con up "$active_con" >/dev/null; info "NetworkManager 配置完成。"; else warn "未找到活动的 NetworkManager 连接。"; fi; else info "未检测到主流网络管理工具，将直接修改 /etc/resolv.conf"; warn "警告: 直接修改此文件可能不是永久性的。"; cp /etc/resolv.conf /etc/resolv.conf.bak_$(date +%F); echo "nameserver 127.0.0.1" > /etc/resolv.conf; info "/etc/resolv.conf 已修改。"; fi
+    protect_resolv_conf; if grep -q "127.0.0.1" /etc/resolv.conf; then info "DNS配置成功！"; else warn "DNS配置可能未完全生效。"; fi
 }
 configure_xrayr() {
     step 6 "可选: 自动配置 XrayR"
-    # ... 省略代码，与之前版本相同 ...
+    local XRAYR_DIR="/etc/XrayR"; if ! [ -d "$XRAYR_DIR" ]; then info "未检测到 XrayR 安装目录 ($XRAYR_DIR)，跳过此步骤。"; return; fi
+    info "检测到 XrayR，开始自动化配置..."; local TARGET_DNS_PORT="53"; local ROUTE_FILE="$XRAYR_DIR/route.json"; local DNS_FILE="$XRAYR_DIR/dns.json"
+    if [ -f "$ROUTE_FILE" ]; then info "正在处理 $ROUTE_FILE ..."; local tmp_route=$(mktemp); jq --argjson port "$TARGET_DNS_PORT" '.rules |= ([{"type": "field","ip": ["127.0.0.1"],"port": $port,"outboundTag": "IPv4_out"}] + [.[] | select(.port != $port or .ip[0] != "127.0.0.1")])' "$ROUTE_FILE" > "$tmp_route" && mv "$tmp_route" "$ROUTE_FILE"; info "route.json 修改完成：已添加本地DNS直连规则。"; else warn "未找到 $ROUTE_FILE，跳过。"; fi
+    if [ -f "$DNS_FILE" ]; then info "正在处理 $DNS_FILE ..."; local tmp_dns=$(mktemp); jq --argjson target_port "$TARGET_DNS_PORT" '.servers = ([{"address": "127.0.0.1","port": $target_port}] + (.servers | map(select(type == "object" and .domains != null) | (.port |= if . == 10053 then $target_port else . end))))' "$DNS_FILE" > "$tmp_dns" && mv "$tmp_dns" "$DNS_FILE"; info "dns.json 修改完成：已设 127.0.0.1:53 为首选，并修正解锁DNS端口。"; else warn "未找到 $DNS_FILE，跳过。"; fi
+    if command -v xrayr &> /dev/null; then info "正在重启 XrayR 服务以应用配置..."; xrayr restart; info "XrayR 重启完成。"; else warn "未找到 'xrayr' 命令，请手动重启 XrayR 服务。"; fi
 }
 main() {
     check_root
