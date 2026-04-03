@@ -60,7 +60,6 @@ ufw allow 22/tcp 2>/dev/null
 ufw allow 80/tcp 2>/dev/null
 ufw allow 443/tcp 2>/dev/null
 ufw allow 2233/tcp 2>/dev/null
-ufw allow 2096/tcp 2>/dev/null
 ufw allow 10053/tcp 2>/dev/null
 ufw allow 10053/udp 2>/dev/null
 ufw allow 4500:65535/tcp 2>/dev/null
