@@ -5,13 +5,7 @@
       "type": "field",
       "outboundTag": "block",
       "ip": [
-        "geoip:private",
-        "geoip:cn",
-        "127.0.0.1/32",
-        "10.0.0.0/8",
-        "fc00::/7",
-        "fe80::/10",
-        "172.16.0.0/12"
+        "geoip:cn"
       ]
     },
     {
@@ -37,6 +31,7 @@
         "regexp:(.*\\.||)(amap|map\\.qq|autonavi)\\.(com|cn|net|org|hk|info)",
         "regexp:(.*\\.||)(ping0|ip-api|ip138|ipinfo|ipip|whoer|ipleak|browserleaks|whatismyip|ifconfig|maxmind|ipstack|ip2location|db-ip|digitalelement|skk)\\.(cc|com|net|org|io|me|co|sb|cn|moe|info|tv|biz|de|uk|us)",
         "regexp:(api|ps|sv|offnavi|newvector|ulog\\.imap|newloc)(\\.map|)\\.(baidu|n\\.shifen)\\.(com|cn|net|org|hk|info)"
+        "geosite:cn" 
       ]
     },
     {
