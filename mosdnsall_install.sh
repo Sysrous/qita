@@ -125,26 +125,6 @@ else
     exit 1
 fi
 
-# 10. 修改 XrayR 配置 (route.json & dns.json)
-ROUTE_FILE="/etc/XrayR/route.json"
-DNS_FILE="/etc/XrayR/dns.json"
-
-echo "正在优化 XrayR 配置文件..."
-
-# 修改 route.json: 置顶放行 MosDNS
-if [ -f "$ROUTE_FILE" ]; then
-    tmp_route=$(mktemp)
-    jq --arg port "$PORT" '
-        .rules = ([{
-            "type": "field",
-            "ip": ["127.0.0.1"],
-            "port": ($port | tonumber),
-            "outboundTag": "IPv4_out"
-        }] + [.rules[] | select(.ip != ["127.0.0.1"] or .port != ($port | tonumber))])
-    ' "$ROUTE_FILE" > "$tmp_route" && mv "$tmp_route" "$ROUTE_FILE"
-    echo "   - route.json 修改完成 (MosDNS 已放行)。"
-fi
-
 # 修改 dns.json: 保留流媒体解锁并置顶 MosDNS
 if [ -f "$DNS_FILE" ]; then
     tmp_dns=$(mktemp)
