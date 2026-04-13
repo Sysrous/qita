@@ -125,15 +125,29 @@ else
     exit 1
 fi
 
-# 修改 dns.json: 保留流媒体解锁并置顶 MosDNS
+# 修改 dns.json: 自动判断场景 + 保留解锁 + 动态本地DNS
 if [ -f "$DNS_FILE" ]; then
     tmp_dns=$(mktemp)
-    jq --arg port "$PORT" '
-        .servers = ([{
-            "address": "127.0.0.1",
-            "port": ($port | tonumber)
-        }] + [.servers[] | select(type == "object" and .domains != null)])
-        | .tag = "dns_inbound"
+    jq --arg port "$PORT' '
+        # 匹配干净默认配置，直接完整覆盖
+        if (.servers | length == 3 and .servers[0] == "localhost" and .servers[1] == "1.1.1.1" and .servers[2] == "8.8.8.8") then
+            {
+                "servers": [
+                    {
+                        "address": "127.0.0.1",
+                        "port": ($port | tonumber)
+                    }
+                ],
+                "tag": "dns_inbound"
+            }
+        else
+            # 非默认配置：仅保留本地MosDNS + 解锁规则，删除公共DNS
+            .servers = ([{
+                "address": "127.0.0.1",
+                "port": ($port | tonumber)
+            }] + [.servers[] | select(type == "object" and (.domains != null or .ip != null))])
+            | .tag = "dns_inbound"
+        end
     ' "$DNS_FILE" > "$tmp_dns" && mv "$tmp_dns" "$DNS_FILE"
     echo "   - dns.json 修改完成 (仅本地MosDNS + 解锁配置已保留)。"
 fi
