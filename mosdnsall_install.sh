@@ -126,30 +126,42 @@ else
 fi
 
 # 修改 dns.json: 自动判断场景 + 保留解锁 + 动态本地DNS
+# 修改 dns.json：自动覆盖默认配置 + 保留解锁DNS + 动态端口
 if [ -f "$DNS_FILE" ]; then
     tmp_dns=$(mktemp)
-    jq --arg port "$PORT' '
-        # 匹配干净默认配置，直接完整覆盖
-        if (.servers | length == 3 and .servers[0] == "localhost" and .servers[1] == "1.1.1.1" and .servers[2] == "8.8.8.8") then
-            {
-                "servers": [
-                    {
-                        "address": "127.0.0.1",
-                        "port": ($port | tonumber)
-                    }
-                ],
-                "tag": "dns_inbound"
-            }
-        else
-            # 非默认配置：仅保留本地MosDNS + 解锁规则，删除公共DNS
-            .servers = ([{
-                "address": "127.0.0.1",
-                "port": ($port | tonumber)
-            }] + [.servers[] | select(type == "object" and (.domains != null or .ip != null))])
+    
+    # 读取当前内容
+    current_content=$(cat "$DNS_FILE")
+    
+    # 判断是否是【默认干净配置】
+    if echo "$current_content" | grep -q 'localhost.*1.1.1.1.*8.8.8.8'; then
+        # 情况1：默认配置 → 直接完整覆盖
+        cat > "$tmp_dns" <<EOF
+{
+  "servers": [
+    {
+      "address": "127.0.0.1",
+      "port": $PORT
+    }
+  ],
+  "tag": "dns_inbound"
+}
+EOF
+    else
+        # 情况2：有解锁DNS → 只替换本地DNS，保留解锁
+        jq --argjson port "$PORT" '
+            .servers = [
+                {
+                    "address": "127.0.0.1",
+                    "port": $port
+                }
+            ] + [ .[] | select(.domains != null) ]
             | .tag = "dns_inbound"
-        end
-    ' "$DNS_FILE" > "$tmp_dns" && mv "$tmp_dns" "$DNS_FILE"
-    echo "   - dns.json 修改完成 (仅本地MosDNS + 解锁配置已保留)。"
+        ' "$DNS_FILE" > "$tmp_dns"
+    fi
+    
+    mv -f "$tmp_dns" "$DNS_FILE"
+    echo "   - dns.json 已自动配置完成。"
 fi
 # 11. 重启 XrayR 并检测状态
 echo "正在重启 XrayR..."
