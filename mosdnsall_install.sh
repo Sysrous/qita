@@ -133,10 +133,10 @@ if [ -f "$DNS_FILE" ]; then
             "address": "127.0.0.1",
             "port": ($port | tonumber)
         }] + [.servers[] | select(type == "object" and .domains != null)])
+        | .tag = "dns_inbound"
     ' "$DNS_FILE" > "$tmp_dns" && mv "$tmp_dns" "$DNS_FILE"
-    echo "   - dns.json 修改完成 (解锁配置已保留)。"
+    echo "   - dns.json 修改完成 (仅本地MosDNS + 解锁配置已保留)。"
 fi
-
 # 11. 重启 XrayR 并检测状态
 echo "正在重启 XrayR..."
 xrayr restart &> /dev/null || systemctl restart XrayR &> /dev/null
