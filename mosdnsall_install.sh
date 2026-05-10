@@ -12,13 +12,17 @@ mkdir -p /etc/mosdns
 read -p "请输入 MosDNS 自定义端口 (默认 15454): " PORT
 PORT=${PORT:-15454}
 
-# 3. 安装依赖 (jq)
-if ! command -v jq &> /dev/null; then
-    echo "正在安装 jq 处理 JSON 配置文件..."
+# 3. 安装依赖 (jq, unzip, wget)
+need_pkgs=()
+command -v jq    >/dev/null 2>&1 || need_pkgs+=(jq)
+command -v unzip >/dev/null 2>&1 || need_pkgs+=(unzip)
+command -v wget  >/dev/null 2>&1 || need_pkgs+=(wget)
+if [ ${#need_pkgs[@]} -gt 0 ]; then
+    echo "正在安装依赖: ${need_pkgs[*]}"
     if [ -f /usr/bin/apt ]; then
-        apt-get update && apt-get install -y jq
+        apt-get update && apt-get install -y "${need_pkgs[@]}"
     else
-        yum install -y jq
+        yum install -y "${need_pkgs[@]}"
     fi
 fi
 
@@ -27,7 +31,7 @@ ARCH=$(uname -m)
 case $ARCH in
     x86_64)  PLAT="amd64" ;;
     aarch64) PLAT="arm64" ;;
-    *) echo "不支持的架构"; exit 1 ;;
+    *) echo "不支持的架构: $ARCH"; exit 1 ;;
 esac
 echo "正在下载 MosDNS v5.3.1 ($PLAT)..."
 wget -O /tmp/mosdns.zip https://github.com/IrineSistiana/mosdns/releases/download/v5.3.1/mosdns-linux-${PLAT}.zip
@@ -125,44 +129,55 @@ else
     exit 1
 fi
 
-# 修改 dns.json: 自动判断场景 + 保留解锁 + 动态本地DNS
-# 修改 dns.json：自动覆盖默认配置 + 保留解锁DNS + 动态端口
+# 10. 修改 dns.json：分三种情况处理
+#  A) servers 里已存在 127.0.0.1 条目  → 只刷新 port 为当前 $PORT，其它原样保留
+#  B) servers 里出现 localhost/1.1.1.1/8.8.8.8 任一默认串
+#       → 剔除这三个默认串，最前面插入 {127.0.0.1:$PORT}，解锁条目保留
+#  C) 其它（纯自定义解锁配置，没有上述任何标志）→ 不动 servers，只刷 tag
+DNS_FILE="/etc/XrayR/dns.json"
+
 if [ -f "$DNS_FILE" ]; then
     tmp_dns=$(mktemp)
-    
-    # 读取当前内容
-    current_content=$(cat "$DNS_FILE")
-    
-    # 判断是否是【默认干净配置】
-    if echo "$current_content" | grep -q 'localhost.*1.1.1.1.*8.8.8.8'; then
-        # 情况1：默认配置 → 直接完整覆盖
-        cat > "$tmp_dns" <<EOF
-{
-  "servers": [
-    {
-      "address": "127.0.0.1",
-      "port": $PORT
-    }
-  ],
-  "tag": "dns_inbound"
-}
-EOF
-    else
-        # 情况2：有解锁DNS → 只替换本地DNS，保留解锁
-        jq --argjson port "$PORT" '
-            .servers = [
-                {
-                    "address": "127.0.0.1",
-                    "port": $port
-                }
-            ] + [ .[] | select(.domains != null) ]
-            | .tag = "dns_inbound"
-        ' "$DNS_FILE" > "$tmp_dns"
-    fi
-    
-    mv -f "$tmp_dns" "$DNS_FILE"
+
+    jq --argjson port "$PORT" '
+        if (.servers | type) != "array" then
+            .
+        elif any(.servers[]?;
+                 (type == "object") and (.address == "127.0.0.1"))
+        then
+            # 情况 A：已配置过，只刷新 127.0.0.1 的端口
+            .servers |= map(
+                if (type == "object") and (.address == "127.0.0.1")
+                then .port = $port
+                else .
+                end
+            )
+        elif any(.servers[]?;
+                 (type == "string") and
+                 (. == "localhost" or . == "1.1.1.1" or . == "8.8.8.8"))
+        then
+            # 情况 B：检测到默认串，剔除并注入本地 MosDNS
+            .servers = (
+                [ { "address": "127.0.0.1", "port": $port } ]
+                + ( .servers
+                    | map(select(
+                        (type != "string")
+                        or (. != "localhost" and . != "1.1.1.1" and . != "8.8.8.8")
+                      ))
+                  )
+            )
+        else
+            # 情况 C：纯自定义，不动
+            .
+        end
+        | .tag = "dns_inbound"
+    ' "$DNS_FILE" > "$tmp_dns" && mv -f "$tmp_dns" "$DNS_FILE"
+
     echo "   - dns.json 已自动配置完成。"
+else
+    echo "   - 未找到 $DNS_FILE，跳过 dns.json 配置。"
 fi
+
 # 11. 重启 XrayR 并检测状态
 echo "正在重启 XrayR..."
 xrayr restart &> /dev/null || systemctl restart XrayR &> /dev/null
@@ -176,6 +191,7 @@ fi
 
 echo "------------------------------------------------"
 echo "🎉 所有流程已处理完毕！"
+echo "MosDNS 监听: 127.0.0.1:$PORT"
 echo "DNS 缓存: 已开启 (3天乐观缓存)"
 echo "IPv6 支持: 已开启"
 echo "日志清理: 已开启 (2小时强制清理)"
