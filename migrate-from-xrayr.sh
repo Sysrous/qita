@@ -47,7 +47,10 @@ STEP()  { echo -e "\n${BLUE_PREFIX} ${1}" >&2; }
 KIMIR_VERSION="v1.8"
 AUTO_YES="false"
 NO_BUMP="false"
-INSTALL_URL_BASE="https://raw.githubusercontent.com/Sysrous/KimiR/main/install.sh"
+# 用 api.github.com/contents endpoint 而不是 raw.githubusercontent.com，
+# 原因：fine-grained PAT (github_pat_*) 在 raw URL 上经常 404，api endpoint 稳定。
+INSTALL_API_URL="https://api.github.com/repos/Sysrous/KimiR/contents/install.sh"
+INSTALL_RAW_URL_LEGACY="https://raw.githubusercontent.com/Sysrous/KimiR/main/install.sh"
 # 私库需要 PAT；优先用 -t/--token 命令行参数，否则用 GH_TOKEN / GITHUB_TOKEN 环境变量。
 # install.sh 的 -t/--token 走 GitHub Releases API 同一个 token。
 GH_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
@@ -234,18 +237,42 @@ INFO "下载 install.sh ..."
 tmp_install=$(mktemp /tmp/kimir-install.XXXXXX.sh) || { ERROR "mktemp 失败"; exit 1; }
 trap 'rm -f "$tmp_install"' EXIT
 
-# 私库必须带 Authorization 头；公开仓库也可以带，不影响。
+# 优先 api.github.com/contents endpoint（对 fine-grained PAT 友好）；
+# 失败时回落到 raw URL（兼容 classic PAT / 公开仓库情况）。
 curl_auth=()
 if [[ -n "$GH_TOKEN" ]]; then
     curl_auth=(-H "Authorization: token ${GH_TOKEN}")
-    INFO "使用 PAT 鉴权下载 install.sh"
+    INFO "使用 PAT 鉴权下载 install.sh (api endpoint)"
 else
-    WARN "未设置 GH_TOKEN，按公开仓库尝试；若仓库是私库会 404"
+    WARN "未设置 GH_TOKEN，按公开仓库尝试；若仓库是私库会失败"
 fi
 
-if ! curl -fsSL --proto '=https' --tlsv1.2 "${curl_auth[@]}" -o "$tmp_install" "$INSTALL_URL_BASE"; then
-    ERROR "下载 install.sh 失败 (${INSTALL_URL_BASE})"
-    ERROR "私库请加 -t <PAT> 或 export GH_TOKEN=<PAT>"
+# 走 api endpoint：raw 内容由 Accept: application/vnd.github.raw 触发
+if ! curl -fsSL --proto '=https' --tlsv1.2 \
+        "${curl_auth[@]}" \
+        -H "Accept: application/vnd.github.raw" \
+        -o "$tmp_install" \
+        "$INSTALL_API_URL"; then
+    WARN "api endpoint 下载失败，回落到 raw URL 再试一次"
+    if ! curl -fsSL --proto '=https' --tlsv1.2 \
+            "${curl_auth[@]}" \
+            -o "$tmp_install" \
+            "$INSTALL_RAW_URL_LEGACY"; then
+        ERROR "两条 URL 都下载失败"
+        ERROR "  api: ${INSTALL_API_URL}"
+        ERROR "  raw: ${INSTALL_RAW_URL_LEGACY}"
+        ERROR "1) 验证 PAT 大小写完整: head -c 30 <<< \"\$GH_TOKEN\""
+        ERROR "2) 验证 PAT 能访问仓库: curl -fsS -H \"Authorization: token \$GH_TOKEN\" https://api.github.com/repos/Sysrous/KimiR | head -3"
+        ERROR "3) PAT 需要 Contents:Read 权限对 Sysrous/KimiR 仓库"
+        print_rollback_hint
+        exit 1
+    fi
+fi
+
+# 简单 sanity 检查：内容看着像 bash 脚本
+if ! head -1 "$tmp_install" | grep -q '^#!/'; then
+    ERROR "下载的 install.sh 内容不是 bash 脚本，可能拿到了 GitHub JSON 错误体："
+    head -3 "$tmp_install" >&2
     print_rollback_hint
     exit 1
 fi
@@ -340,9 +367,10 @@ WebSocket 自动启用（面板 server_ws_enable=1 时）；从日志里搜
 "WS 推送通道已启动 / WS 鉴权成功" 可确认是否吃到。
 
 刷 geoip/geosite（之后想单独更新时；私库别忘了 token）：
-  sudo bash <(curl -fsSL --proto '=https' --tlsv1.2 \\
-    -H "Authorization: token \$GH_TOKEN" \\
-    ${INSTALL_URL_BASE}) -m update-geo -t \$GH_TOKEN
+  curl -fsSL -H "Authorization: token \$GH_TOKEN" \\
+    -H "Accept: application/vnd.github.raw" \\
+    ${INSTALL_API_URL} \\
+    | bash -s -- -m update-geo -t \$GH_TOKEN
 DONE
 
 print_rollback_hint
