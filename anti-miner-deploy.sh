@@ -1,9 +1,17 @@
 #!/bin/bash
 # ============================================================
 #  一键挖矿木马清除 + Nezha v1 漏洞查杀 + 持续防护部署
-#  Nezha 面板批量执行 / 单机 bash anti-miner-deploy.sh
+#  支持 Nezha 面板批量任务 / 单机执行
 # ============================================================
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# Nezha 任务模式：后台执行，避免超时
+if [ "$1" != "--run" ]; then
+    nohup bash "$0" --run >/dev/null 2>&1 &
+    echo "已启动后台部署 (PID $!) 日志: /var/log/anti-miner.log"
+    exit 0
+fi
+
 LOG="/var/log/anti-miner.log"
 ts(){ date '+%F %T'; }
 log(){ echo "[$(ts)] $*"; echo "[$(ts)] $*" >> "$LOG"; }
