@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-#  一键挖矿木马清除 + Nezha v1 漏洞查杀 + 持续防护部署
+#  一键挖矿木马清除 + Nezha v1 漏洞查杀 + 持续防护部署 (已修复宝塔兼容并增加Kaiji清理)
 #  支持 Nezha 面板批量任务 / 单机执行
 # ============================================================
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -19,11 +19,11 @@ log(){ echo "[$(ts)] $*"; echo "[$(ts)] $*" >> "$LOG"; }
 log "========== 开始一键部署 =========="
 
 # =============================================
-#  第一步：立即清除已有矿工
+#  第一步：立即清除已有矿工及木马
 # =============================================
 log "[1/6] 扫描并清除矿工进程..."
 
-# 杀高CPU进程(>80%，排除内核线程)
+# 杀高CPU异常进程（只针对可疑路径运行的进程，或已知特征进程，排除编译器，避免误杀宝塔、数据库等正常服务）
 while IFS= read -r line; do
     pid=$(echo "$line" | awk '{print $2}')
     cpu=$(echo "$line" | awk '{print $3}')
@@ -31,19 +31,41 @@ while IFS= read -r line; do
     exe=$(readlink /proc/$pid/exe 2>/dev/null)
     [ -z "$exe" ] && continue
     [[ "$cmd_str" =~ anti-miner ]] && continue
-    log "  击杀高CPU: PID=$pid CPU=${cpu}% EXE=$exe"
-    kill -9 "$pid" 2>/dev/null
+    
+    # 限制在可疑路径（如/tmp, /dev/shm, /var/tmp, /root/.*）或者已知木马特征
+    if [[ "$exe" == /root/.* || "$exe" == /tmp/* || "$exe" == /var/tmp/* || "$exe" == /dev/shm/* ]] || [[ "$cmd_str" =~ (xmrig|kinsing|kdevtmpfsi|libgdi|kworker_u8) ]]; then
+        # 排除编译器及系统安装/构建工具，防止误杀宝塔面板安装软件的任务
+        if [[ "$cmd_str" =~ (gcc|g\+\+|clang|make|cmake|cargo|go\ build|dpkg|apt|yum|dnf|rpm|rustc) ]]; then
+            continue
+        fi
+        log "  击杀高CPU异常进程: PID=$pid CPU=${cpu}% EXE=$exe"
+        kill -9 "$pid" 2>/dev/null
+    fi
 done < <(ps aux --sort=-%cpu | awk 'NR>1 && $3+0>=80')
 
-# 杀已知矿工名
-for pattern in xmrig xmr-stak ccminer cgminer bfgminer minerd ksysrqd kdevtmpfsi kinsing cryptonight xmhv solrd dbused; do
+# 杀已知矿工及木马进程名 (增加 libgdi.so 木马匹配)
+for pattern in xmrig xmr-stak ccminer cgminer bfgminer minerd ksysrqd kdevtmpfsi kinsing cryptonight xmhv solrd dbused libgdi\.so; do
     pids=$(pgrep -f "$pattern" 2>/dev/null | grep -v $$)
     for p in $pids; do
         exe=$(readlink /proc/$p/exe 2>/dev/null)
         [ -z "$exe" ] && continue
-        log "  击杀矿工: PID=$p NAME=$pattern EXE=$exe"
+        log "  击杀矿工/木马: PID=$p NAME=$pattern EXE=$exe"
         kill -9 "$p" 2>/dev/null
     done
+done
+
+# 杀伪装成 kworker 的用户态木马进程
+for piddir in /proc/[0-9]*/; do
+    pid=${piddir#/proc/}; pid=${pid%/}
+    [ -d "/proc/$pid" ] || continue
+    exe=$(readlink /proc/$pid/exe 2>/dev/null)
+    [ -z "$exe" ] && continue
+    cmdline=$(tr '\0' ' ' < /proc/$pid/cmdline 2>/dev/null)
+    # 如果可执行文件在 /tmp, /dev/shm, /var/tmp, /usr/lib 等地，且包含 kworker，100%是木马
+    if [[ "$exe" == /tmp/* || "$exe" == /dev/shm/* || "$exe" == /var/tmp/* || "$exe" == /usr/lib/* ]] && [[ "$cmdline" == *kworker* ]]; then
+        log "  击杀伪装 kworker 进程: PID=$pid EXE=$exe CMD=$cmdline"
+        kill -9 "$pid" 2>/dev/null
+    fi
 done
 
 # 杀伪装内核线程(有exe但cmdline带方括号)
@@ -58,12 +80,14 @@ for piddir in /proc/[0-9]*/; do
 done
 
 # =============================================
-#  第二步：清除木马文件
+#  第二步：清除木马文件及持久化项
 # =============================================
 log "[2/6] 清除木马文件和服务..."
 
-# 常见木马路径
-for f in /usr/bin/defunct /usr/bin/dbused /usr/bin/kinsing /usr/bin/kdevtmpfsi /tmp/kdevtmpfsi /tmp/kinsing /var/tmp/kinsing; do
+# 常见木马路径（加入 Kaiji/Ares 特征文件路径）
+for f in /usr/bin/defunct /usr/bin/dbused /usr/bin/kinsing /usr/bin/kdevtmpfsi /tmp/kdevtmpfsi /tmp/kinsing /var/tmp/kinsing \
+         /.mod /usr/lib/libgdi.so.0.8.1 /usr/lib/libgdi.so.0.8.2 /lib/system.mark /boot/system.pub \
+         /etc/profile.d/gateway.sh /etc/profile.d/bash.cfg /etc/System.mod /etc/system.mod; do
     if [ -f "$f" ]; then
         chattr -i "$f" 2>/dev/null; rm -f "$f" && log "  已删: $f"
     fi
@@ -101,10 +125,19 @@ for svc_pat in defunct cryptod minerd kswapd0 dbused kernelagent xmrig; do
 done
 systemctl daemon-reload 2>/dev/null
 
-# 清理可疑 crontab
-if crontab -l 2>/dev/null | grep -qiE 'xmr|miner|\.xhv|kinsing|kdevtmpfsi|/dev/shm.*bash'; then
+# 清理 /etc/crontab 中的木马保活项 (/.mod 等)
+if [ -f /etc/crontab ]; then
+    if grep -qE '/\.mod|/dev/shm|/tmp' /etc/crontab; then
+        chattr -i /etc/crontab 2>/dev/null
+        sed -i -E '/\/\.mod|\/dev\/shm|\/tmp/d' /etc/crontab
+        log "  已清理 /etc/crontab 中的恶意持久化项"
+    fi
+fi
+
+# 清理可疑用户 crontab
+if crontab -l 2>/dev/null | grep -qiE 'xmr|miner|\.xhv|kinsing|kdevtmpfsi|/dev/shm.*bash|/\.mod'; then
     log "  清理可疑 crontab 条目"
-    crontab -l 2>/dev/null | grep -viE 'xmr|miner|\.xhv|kinsing|kdevtmpfsi|/dev/shm.*bash' | crontab -
+    crontab -l 2>/dev/null | grep -viE 'xmr|miner|\.xhv|kinsing|kdevtmpfsi|/dev/shm.*bash|/\.mod' | crontab -
 fi
 
 # 释放矿工残留的 HugePages
@@ -206,7 +239,7 @@ done
 systemctl daemon-reload 2>/dev/null
 
 # =============================================
-#  第四步：部署持续防护
+#  第四步：部署持续防护 (在后台脚本中也防止误杀宝塔)
 # =============================================
 log "[4/6] 部署持续防护..."
 
@@ -219,9 +252,9 @@ log(){ echo "[$(ts)] $*" >> "$LOG"; }
 alert(){ echo "[$(ts)] [!] $*" >> "$LOG"; ALERT=1; }
 log "===== 扫描 ====="
 
-# --- 挖矿查杀 ---
+# --- 挖矿与木马查杀 ---
 
-# 高CPU(>80%)
+# 高CPU(>80%)，排除了宝塔编译、系统编译及已知构建命令
 while IFS= read -r line; do
     pid=$(echo "$line" | awk '{print $2}')
     cpu=$(echo "$line" | awk '{print $3}')
@@ -229,19 +262,52 @@ while IFS= read -r line; do
     cmd=$(echo "$line" | awk '{for(i=11;i<=NF;i++) printf "%s ",$i}')
     [[ "$cmd" =~ ^\[ ]] && continue
     [[ "$cmd" =~ anti-miner ]] && continue
-    alert "高CPU: PID=$pid ${cpu}% $exe"
     if [[ "$exe" == /root/.* || "$exe" == /tmp/* || "$exe" == /var/tmp/* || "$exe" == /dev/shm/* ]]; then
+        # 排除编译器及系统安装/构建工具，防止误杀宝塔等面板在编译时被误杀
+        if [[ "$cmd" =~ (gcc|g\+\+|clang|make|cmake|cargo|go\ build|dpkg|apt|yum|dnf|rpm|rustc) ]]; then
+            continue
+        fi
+        alert "高CPU: PID=$pid ${cpu}% $exe"
         kill -9 "$pid" 2>/dev/null && alert "已杀 $pid"
     fi
 done < <(ps aux --sort=-%cpu | awk 'NR>1 && $3+0>=80')
 
-# 已知矿工名
-for p in xmrig xmr-stak ccminer cgminer bfgminer minerd ksysrqd kdevtmpfsi kinsing xmhv solrd dbused; do
+# 已知矿工及木马名（增加 libgdi.so 木马匹配）
+for p in xmrig xmr-stak ccminer cgminer bfgminer minerd ksysrqd kdevtmpfsi kinsing xmhv solrd dbused libgdi\.so; do
     pgrep -f "$p" 2>/dev/null | while read kpid; do
         exe=$(readlink /proc/$kpid/exe 2>/dev/null); [ -z "$exe" ] && continue
-        alert "矿工: $kpid $p $exe"; kill -9 "$kpid" 2>/dev/null
+        alert "矿工/木马: $kpid $p $exe"; kill -9 "$kpid" 2>/dev/null
     done
 done
+
+# 杀伪装成 kworker 的用户态木马进程
+for piddir in /proc/[0-9]*/; do
+    pid=${piddir#/proc/}; pid=${pid%/}
+    [ -d "/proc/$pid" ] || continue
+    exe=$(readlink /proc/$pid/exe 2>/dev/null)
+    [ -z "$exe" ] && continue
+    cmdline=$(tr '\0' ' ' < /proc/$pid/cmdline 2>/dev/null)
+    if [[ "$exe" == /tmp/* || "$exe" == /dev/shm/* || "$exe" == /var/tmp/* || "$exe" == /usr/lib/* ]] && [[ "$cmdline" == *kworker* ]]; then
+        alert "伪装 kworker 进程: $pid $exe"
+        kill -9 "$pid" 2>/dev/null
+    fi
+done
+
+# 持续清理 Kaiji 木马文件及持久化项
+for f in /.mod /usr/lib/libgdi.so.0.8.1 /usr/lib/libgdi.so.0.8.2 /lib/system.mark /boot/system.pub \
+         /etc/profile.d/gateway.sh /etc/profile.d/bash.cfg /etc/System.mod /etc/system.mod; do
+    if [ -f "$f" ]; then
+        alert "清理残留文件: $f"
+        chattr -i "$f" 2>/dev/null; rm -f "$f"
+    fi
+done
+
+# 清理 /etc/crontab 中的木马保活项
+if [ -f /etc/crontab ] && grep -qE '/\.mod|/dev/shm|/tmp' /etc/crontab; then
+    alert "清理 /etc/crontab 恶意项"
+    chattr -i /etc/crontab 2>/dev/null
+    sed -i -E '/\/\.mod|\/dev\/shm|\/tmp/d' /etc/crontab
+fi
 
 # 伪装内核线程
 for piddir in /proc/[0-9]*/; do
@@ -341,7 +407,7 @@ for svc in $(grep -rl '207.58.173.192' /etc/systemd/system/ /lib/systemd/system/
 done
 
 # 可疑 crontab
-crontab -l 2>/dev/null | grep -iE 'xmr|miner|\.xhv|kinsing|curl.*\|.*bash|wget.*\|.*bash|/dev/shm' | grep -v anti-miner | while read -r cline; do
+crontab -l 2>/dev/null | grep -iE 'xmr|miner|\.xhv|kinsing|curl.*\|.*bash|wget.*\|.*bash|/dev/shm|/\.mod' | grep -v anti-miner | while read -r cline; do
     alert "可疑cron: $cline"
 done
 
@@ -352,11 +418,11 @@ XEOF
 chmod +x /opt/anti-miner.sh
 
 # =============================================
-#  第五步：写 cron
+#  第五步：写 cron (已改为每 2 小时运行一次)
 # =============================================
 log "[5/6] 配置定时任务..."
 (crontab -l 2>/dev/null | grep -v 'anti-miner') | crontab -
-(crontab -l 2>/dev/null; echo '*/10 * * * * /opt/anti-miner.sh') | crontab -
+(crontab -l 2>/dev/null; echo '0 */2 * * * /opt/anti-miner.sh') | crontab -
 
 # =============================================
 #  第六步：验证
@@ -371,10 +437,10 @@ log "========== 部署完成 =========="
 
 echo ""
 echo "====================================="
-echo "  部署完成"
+echo "  部署完成 (已完美兼容宝塔面板编译并加入Kaiji清理)"
 echo "  负载: $load"
 echo "  可用内存: ${mem_avail}MB"
 echo "  HugePages: $hp_now"
-echo "  防护: /opt/anti-miner.sh (每10分钟)"
+echo "  防护: /opt/anti-miner.sh (每2小时运行一次)"
 echo "  日志: /var/log/anti-miner.log"
 echo "====================================="
