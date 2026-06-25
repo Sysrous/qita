@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # ==============================================================================
-# Linux 网络与系统综合优化调整工具 (极限性能榨干与内存保护版)
+# Linux 网络与系统综合优化调整工具 (自适应内存+Swap 安全调优版)
 # 支持带宽档位: 500M, 800M, 1G, 1.5G, 2G, 2.5G, 3G, 5G, 10G, 100G
 # ==============================================================================
 
@@ -12,9 +12,6 @@ Font_color_suffix="\033[0m"
 Info="${Green_font_prefix}[信息]${Font_color_suffix}"
 Error="${Red_font_prefix}[错误]${Font_color_suffix}"
 Warning="${Yellow_font_prefix}[警告]${Font_color_suffix}"
-
-# 全局榨干模式标识
-FORCE_SQUEEZE="false"
 
 # 必须以 root 用户运行
 if [[ $EUID -ne 0 ]]; then
@@ -125,9 +122,14 @@ tune_all() {
   local bw_profile=$1
   echo -e "${Info} 正在应用适用于 ${bw_profile} 带宽的 TCP/内核配置方案..."
 
-  # 获取内存大小
+  # 获取内存与 Swap 大小
   local total_mem_kb=$(awk '/MemTotal/ {print $2}' /proc/meminfo 2>/dev/null)
   local total_mem_mb=$((total_mem_kb / 1024))
+  local swap_kb=$(awk '/SwapTotal/ {print $2}' /proc/meminfo 2>/dev/null)
+  local swap_mb=$((swap_kb / 1024))
+  
+  # 总虚拟内存 (物理内存 + Swap)
+  local total_virtual_mb=$((total_mem_mb + swap_mb))
   
   # 定义网络调优变量初值
   local rmem_max wmem_max tcp_rmem tcp_wmem backlog somaxconn max_syn
@@ -216,13 +218,13 @@ tune_all() {
       max_syn=32768
       ;;
     "100G")
-      if [ "$total_mem_mb" -ge 32768 ]; then
-        rmem_max=805306368  # 768 MB (高内存物理机/高配虚拟机)
+      if [ "$total_virtual_mb" -ge 32768 ]; then
+        rmem_max=805306368  # 768 MB
         wmem_max=805306368
         tcp_rmem="4096 87380 805306368"
         tcp_wmem="4096 65536 805306368"
       else
-        rmem_max=402653184  # 384 MB (中内存机型安全适配)
+        rmem_max=402653184  # 384 MB
         wmem_max=402653184
         tcp_rmem="4096 87380 402653184"
         tcp_wmem="4096 65536 402653184"
@@ -238,28 +240,29 @@ tune_all() {
       ;;
   esac
 
-  # 内存安全守护 (如果启用了极限榨干，则跳过)
-  if [ "$FORCE_SQUEEZE" = "true" ]; then
-      echo -e "${Warning} 【极限榨干模式开启】已绕过内存大小限制，强制写入完整机械性能参数！"
-  else
-      local max_safe_buffer=805306368 # 768MB
-      if [ "$total_mem_mb" -lt 1024 ]; then
-          max_safe_buffer=8388608    # 1G内存以下限制8MB
-      elif [ "$total_mem_mb" -lt 2048 ]; then
-          max_safe_buffer=16777216   # 2G内存以下限制16MB
-      elif [ "$total_mem_mb" -lt 4096 ]; then
-          max_safe_buffer=67108864   # 4G内存以下限制64MB
-      elif [ "$total_mem_mb" -lt 8192 ]; then
-          max_safe_buffer=134217728  # 8G内存以下限制128MB
-      fi
+  # 内存安全守护 (基于 [物理内存 + Swap] 综合判定)
+  local max_safe_buffer=805306368 # 768MB
+  if [ "$total_virtual_mb" -lt 512 ]; then
+      max_safe_buffer=4194304     # 总容量 < 512M 限制 4MB
+  elif [ "$total_virtual_mb" -lt 1024 ]; then
+      max_safe_buffer=8388608     # 总容量 < 1G 限制 8MB
+  elif [ "$total_virtual_mb" -lt 2048 ]; then
+      max_safe_buffer=16777216    # 总容量 < 2G 限制 16MB
+  elif [ "$total_virtual_mb" -lt 4096 ]; then
+      max_safe_buffer=67108864    # 总容量 < 4G 限制 64MB
+  elif [ "$total_virtual_mb" -lt 8192 ]; then
+      max_safe_buffer=134217728   # 总容量 < 8G 限制 128MB
+  elif [ "$total_virtual_mb" -lt 16384 ]; then
+      max_safe_buffer=268435456   # 总容量 < 16G 限制 256MB
+  fi
 
-      if [ "$rmem_max" -gt "$max_safe_buffer" ]; then
-          echo -e "${Warning} 检测到当前物理内存较小 (${total_mem_mb}MB)，为了防止内存溢出(OOM)，最大缓冲区上限已安全限流为 $((max_safe_buffer / 1024 / 1024))MB。"
-          rmem_max=$max_safe_buffer
-          wmem_max=$max_safe_buffer
-          tcp_rmem="4096 87380 $max_safe_buffer"
-          tcp_wmem="4096 65536 $max_safe_buffer"
-      fi
+  if [ "$rmem_max" -gt "$max_safe_buffer" ]; then
+      echo -e "${Warning} 检测到系统可用资源 (物理内存: ${total_mem_mb}MB, Swap: ${swap_mb}MB，总虚拟内存: ${total_virtual_mb}MB)。"
+      echo -e "${Warning} 为防范高并发下内存耗尽(OOM)，最大接收/发送缓冲区已安全限流为 $((max_safe_buffer / 1024 / 1024)) MB。"
+      rmem_max=$max_safe_buffer
+      wmem_max=$max_safe_buffer
+      tcp_rmem="4096 87380 $max_safe_buffer"
+      tcp_wmem="4096 65536 $max_safe_buffer"
   fi
 
   # 清理 sysctl 中的高并发与 TCP 性能相关旧参数
@@ -391,6 +394,8 @@ menu(){
   kern=$(uname -r)
   total_mem_kb=$(awk '/MemTotal/ {print $2}' /proc/meminfo 2>/dev/null)
   total_mem_mb=$((total_mem_kb / 1024))
+  swap_kb=$(awk '/SwapTotal/ {print $2}' /proc/meminfo 2>/dev/null)
+  swap_mb=$((swap_kb / 1024))
   
   # 网卡带宽自动检测 (显示用，不做强制默认执行)
   auto_speed=$(detect_link_speed)
@@ -419,16 +424,17 @@ menu(){
   fi
 
   echo -e "=================================================="
-  echo -e "       Linux 网络高吞吐与 BBR 极限调优脚本        "
+  echo -e "       Linux 网络高吞吐与 BBR 内存自适应调优脚本  "
   echo -e "=================================================="
   echo -e "系统环境: ${opsy} | 架构: ${arch} | 内核: ${kern}"
-  echo -e "虚拟化类型: ${Green_font_prefix}${virtual}${Font_color_suffix} | 内存大小: ${total_mem_mb} MB"
+  echo -e "虚拟化类型: ${Green_font_prefix}${virtual}${Font_color_suffix}"
+  echo -e "物理内存: ${total_mem_mb} MB | Swap大小: ${swap_mb} MB"
   echo -e "自动检测网卡物理带宽: ${auto_speed_str}"
   if [ "$virtual" = "Docker" ] || [ "$virtual" = "Lxc" ] || [ "$virtual" = "OpenVZ" ]; then
       echo -e "${Warning} 当前处于容器环境 (${virtual})，部分内核参数可能无法写入或不生效！"
   fi
   echo -e "=================================================="
-  echo -e "【手动选择目标网络带宽，准备进行极限优化调优】"
+  echo -e "【手动选择目标网络带宽，程序将根据物理内存+Swap自动进行安全上限控制】"
   echo -e " 1)  适配 500M   宽带网络优化方案"
   echo -e " 2)  适配 800M   宽带网络优化方案"
   echo -e " 3)  适配 1G     宽带网络优化方案"
@@ -448,20 +454,6 @@ menu(){
   if [[ ! "$num" =~ ^([1-9]|1[0-2])$ ]]; then
       echo -e "${Error} 无效选择，脚本退出！"
       exit 1
-  fi
-  
-  # 若用户选的是网络调优选项(1-10)，询问是否启用极限性能榨干模式
-  if [ "$num" -ge 1 ] && [ "$num" -le 10 ]; then
-      echo -e ""
-      echo -e "--------------------------------------------------"
-      echo -e "${Warning} 是否开启【极限性能榨干模式】？"
-      echo -e "  - 开启后：忽略系统物理内存限制，强制写入当前所选高带宽的最佳超大 TCP 缓存参数。"
-      echo -e "  - 关闭后：将根据系统可用内存，自动进行安全流控截断，避免高并发下导致内存溢出 (OOM)。"
-      echo -e "--------------------------------------------------"
-      read -p "是否开启极限榨干模式？(y/N): " squeeze_opt
-      if [[ "$squeeze_opt" =~ ^[yY]$ ]]; then
-          FORCE_SQUEEZE="true"
-      fi
   fi
   
   case "$num" in
