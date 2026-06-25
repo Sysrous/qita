@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # ==============================================================================
-# Linux 网络与系统综合优化调整工具 (自适应内存+Swap 安全调优版)
+# Linux 网络与系统综合优化调整工具 (自适应内存+Swap自建扩容版)
 # 支持带宽档位: 500M, 800M, 1G, 1.5G, 2G, 2.5G, 3G, 5G, 10G, 100G
 # ==============================================================================
 
@@ -116,13 +116,88 @@ detect_link_speed() {
 }
 
 #############################################
+# 自动重置并创建 Swap 空间
+#############################################
+setup_swap() {
+  echo -e "${Info} 正在检测并重构系统 Swap 交换空间..."
+
+  # 1. 停用目前系统已启用的所有 Swap（排除虚拟化环境报错影响）
+  local active_swaps=$(swapon --show=NAME --noheadings 2>/dev/null)
+  if [ -n "$active_swaps" ]; then
+      for s in $active_swaps; do
+          echo -e "${Info} 发现正在使用的 Swap 空间: $s，准备停用以防冲突..."
+          swapoff "$s" 2>/dev/null
+      done
+  fi
+
+  # 2. 清理 /etc/fstab 中原有的旧 /swapfile 挂载项
+  cp /etc/fstab /etc/fstab.bak
+  sed -i '/swapfile/d' /etc/fstab
+
+  # 3. 彻底物理删除旧 of /swapfile 文件，为重新创建腾出空间
+  if [ -f /swapfile ]; then
+      echo -e "${Info} 清除旧的 /swapfile 文件..."
+      rm -f /swapfile
+  fi
+
+  # 4. 根据根目录磁盘总容量，动态计算适合扩容的 Swap 大小
+  local disk_size_mb=$(df -m / | awk 'END{print $2}')
+  local disk_size_gb=$((disk_size_mb / 1024))
+  local swap_size_mb=2048 # 默认设为 2G 
+
+  if [ "$disk_size_gb" -lt 6 ]; then
+      swap_size_mb=512     # 硬盘只有 5G 左右，默认扩容 512M
+  elif [ "$disk_size_gb" -lt 10 ]; then
+      swap_size_mb=1024    # 硬盘 8G-9G，默认扩容 1G
+  elif [ "$disk_size_gb" -lt 20 ]; then
+      swap_size_mb=2048    # 硬盘 10G-15G，默认扩容 2G
+  else
+      swap_size_mb=4096    # 硬盘 20G 及以上，默认扩容 4G
+  fi
+
+  echo -e "${Info} 根目录磁盘总容量: ${disk_size_gb} GB | 决策扩容 Swap: ${swap_size_mb} MB"
+
+  # 5. 校验可用磁盘空间是否充足
+  local disk_free_mb=$(df -m / | awk 'END{print $4}')
+  if [ "$disk_free_mb" -le "$swap_size_mb" ]; then
+      echo -e "${Error} 磁盘剩余可用空间不足 ${swap_size_mb} MB！放弃 Swap 创建。"
+      return
+  fi
+
+  # 6. 生成并格式化新的 Swap 文件
+  echo -e "${Info} 正在生成新 Swap 文件 /swapfile (大小: ${swap_size_mb}M) ..."
+  # 优先采用 dd (在所有虚拟化和文件系统上最稳健)
+  dd if=/dev/zero of=/swapfile bs=1M count=$swap_size_mb status=progress
+  
+  if [ ! -f /swapfile ]; then
+      echo -e "${Error} Swap 文件创建失败！"
+      return
+  fi
+
+  # 赋予安全权限，格式化并启用
+  chmod 600 /swapfile
+  mkswap /swapfile >/dev/null
+  if swapon /swapfile 2>/dev/null; then
+      echo "/swapfile swap swap defaults 0 0" >> /etc/fstab
+      echo -e "${Info} 新 Swap 空间挂载并启用成功！当前 Swap 状态："
+      swapon --show
+  else
+      echo -e "${Error} Swap 挂载启用失败！(部分特殊容器虚拟化环境如 Docker/LXC 限制此操作)"
+  fi
+}
+
+#############################################
 # 网络与系统参数综合调整
 #############################################
 tune_all() {
   local bw_profile=$1
+  
+  # 在应用调优前，先执行 Swap 自动重置与扩容
+  setup_swap
+  
   echo -e "${Info} 正在应用适用于 ${bw_profile} 带宽的 TCP/内核配置方案..."
 
-  # 获取内存与 Swap 大小
+  # 获取内存与刚刚创建好的新 Swap 大小
   local total_mem_kb=$(awk '/MemTotal/ {print $2}' /proc/meminfo 2>/dev/null)
   local total_mem_mb=$((total_mem_kb / 1024))
   local swap_kb=$(awk '/SwapTotal/ {print $2}' /proc/meminfo 2>/dev/null)
@@ -240,7 +315,7 @@ tune_all() {
       ;;
   esac
 
-  # 内存安全守护 (基于 [物理内存 + Swap] 综合判定)
+  # 内存安全守护 (基于 [物理内存 + 新建立的Swap] 综合判定)
   local max_safe_buffer=805306368 # 768MB
   if [ "$total_virtual_mb" -lt 512 ]; then
       max_safe_buffer=4194304     # 总容量 < 512M 限制 4MB
@@ -257,7 +332,7 @@ tune_all() {
   fi
 
   if [ "$rmem_max" -gt "$max_safe_buffer" ]; then
-      echo -e "${Warning} 检测到系统可用资源 (物理内存: ${total_mem_mb}MB, Swap: ${swap_mb}MB，总虚拟内存: ${total_virtual_mb}MB)。"
+      echo -e "${Warning} 检测到系统可用资源 (物理内存: ${total_mem_mb}MB, 新创建Swap: ${swap_mb}MB，总可用虚拟内存: ${total_virtual_mb}MB)。"
       echo -e "${Warning} 为防范高并发下内存耗尽(OOM)，最大接收/发送缓冲区已安全限流为 $((max_safe_buffer / 1024 / 1024)) MB。"
       rmem_max=$max_safe_buffer
       wmem_max=$max_safe_buffer
@@ -473,3 +548,4 @@ menu(){
 }
 
 menu
+,Description:Fully write network_tune.sh to integrate setup_swap logic. This cleanly stops active swaps, deletes fstab entries and the old swapfile, detects root disk size, and applies exact dynamic swap sizing rules (5G=512M, 8G-9G=1G, 10G-15G=2G, 20G+=4G).,IsArtifact:false,Overwrite:true,TargetFile:c:\Users\zhatt\Desktop\network_tune.sh,toolAction:Update script with swap auto-rebuild,toolSummary:Integrate swap auto-management}
